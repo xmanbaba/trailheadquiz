@@ -1,163 +1,298 @@
-import streamlit as st
+import os
+import re
 import requests
 from bs4 import BeautifulSoup
+import streamlit as st
 import google.generativeai as genai
-import random
 
-# --------------------
-# Gemini Setup
-# --------------------
-GEMINI_API_KEY = st.secrets.get("gemini_api_key", None)
+# ---------------------------
+# Page config
+# ---------------------------
+st.set_page_config(page_title="Trailhead Quiz Generator", layout="centered")
 
-if not GEMINI_API_KEY:
-    st.error("⚠️ No Gemini API key found. Please add it to `.streamlit/secrets.toml`.")
-else:
-    genai.configure(api_key=GEMINI_API_KEY)
+# ---------------------------
+# API key (Streamlit Cloud: Settings → Secrets → gemini_api_key)
+# ---------------------------
+API_KEY = st.secrets.get("gemini_api_key", os.getenv("GEMINI_API_KEY"))
+if API_KEY:
+    genai.configure(api_key=API_KEY)
 
-# --------------------
-# Helper: Extract text from URL
-# --------------------
-def extract_text_from_url(url):
+# ---------------------------
+# Header + short description (kept from the earlier design)
+# ---------------------------
+st.title("Trailhead Quiz Generator 📝 (Gemini Edition)")
+st.write(
+    "Paste a **Trailhead URL** or **content text**, then generate a quick quiz to check your understanding.\n\n"
+    "**How it works:**\n"
+    "1) Provide a URL or paste the page text → 2) Click **Generate Quiz** → 3) Answer → 4) **Submit** to see your score → 5) **Retake** or **Generate New Quiz**."
+)
+
+# Sidebar help
+with st.sidebar:
+    st.header("How to use")
+    st.markdown(
+        "- Choose **Paste URL** or **Paste Text**.\n"
+        "- Click **Preview Page Text** (for URL) to confirm extraction.\n"
+        "- Click **Generate Quiz**.\n"
+        "- Answer each question and click **Submit Answers**.\n"
+        "- Use **Retake Quiz** to try the same set again.\n"
+        "- Use **Generate New Quiz** for a different set from the same content.\n"
+        "- **Clear Inputs** resets URL/text and quiz state."
+    )
+    st.markdown("---")
+    st.markdown("**Tip:** Some pages block scraping. If URL fails, copy & paste the content instead.")
+
+# ---------------------------
+# Utilities
+# ---------------------------
+def extract_text_from_url(url: str) -> str:
+    """Best-effort extraction of readable text from a webpage."""
     try:
-        response = requests.get(url, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        paragraphs = [p.get_text() for p in soup.find_all("p")]
-        return "\n".join(paragraphs)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        }
+        resp = requests.get(url, headers=headers, timeout=25)
+        resp.raise_for_status()
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        chunks = []
+        for tag in soup.find_all(["h1", "h2", "h3", "p", "li"]):
+            text = tag.get_text(separator=" ", strip=True)
+            if text:
+                chunks.append(text)
+        text = "\n".join(chunks).strip()
+        # Trim very long pages to keep prompts reliable
+        return text[:15000]
     except Exception as e:
-        return f"Error extracting content: {e}"
+        st.error(f"Couldn't fetch the page: {e}")
+        return ""
 
-# --------------------
-# Helper: Generate quiz with Gemini
-# --------------------
-def generate_quiz(text, num_questions=5):
-    prompt = f"""
-    You are a quiz generator. Based on the content below, create {num_questions} multiple-choice questions.
-    Each question should have 1 correct answer and 3 incorrect options. Format strictly as JSON:
-
-    [
-      {{
-        "question": "Sample question?",
-        "options": ["A", "B", "C", "D"],
-        "answer": "B"
-      }},
-      ...
-    ]
-
-    Content:
-    {text}
+def parse_quiz_from_text(raw_quiz: str):
     """
+    Parse Gemini output in the numbered format:
+    1. Question
+       A. ...
+       B. ...
+       C. ...
+       D. ...
+       Correct Answer: X
+       Explanation: ...
+    Returns: list of {question, options, correct, explanation}
+    """
+    parts = re.split(r"(?m)^\s*\d+\.\s+", raw_quiz)
+    parts = [p.strip() for p in parts if p.strip()]
+    quiz = []
 
-    try:
-        model = genai.GenerativeModel("gemini-pro")
-        response = model.generate_content(prompt)
+    for block in parts:
+        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        if not lines:
+            continue
 
-        import json
-        quiz_data = json.loads(response.text)
+        # First non-empty line is the question
+        question_text = lines[0]
 
-        # Shuffle options for each question
-        for q in quiz_data:
-            random.shuffle(q["options"])
+        # Options (accept 'A. ' or 'A) ')
+        options = []
+        for ln in lines:
+            m = re.match(r"^([A-D])[\).]\s*(.*)$", ln)
+            if m:
+                options.append(f"{m.group(1)}. {m.group(2)}")
 
-        return quiz_data
-    except Exception as e:
-        st.error(f"Error generating quiz: {e}")
+        # Correct answer letter
+        correct_match = next((ln for ln in lines if ln.lower().startswith("correct answer")), None)
+        correct_letter = None
+        if correct_match and ":" in correct_match:
+            candidate = correct_match.split(":", 1)[1].strip()
+            m2 = re.match(r"^([A-D])\b", candidate, flags=re.IGNORECASE)
+            if m2:
+                correct_letter = m2.group(1).upper()
+
+        # Explanation
+        explanation_line = next((ln for ln in lines if ln.lower().startswith("explanation")), None)
+        explanation = "No explanation provided."
+        if explanation_line and ":" in explanation_line:
+            explanation = explanation_line.split(":", 1)[1].strip()
+
+        if question_text and options and correct_letter in {"A", "B", "C", "D"}:
+            quiz.append(
+                {
+                    "question": question_text,
+                    "options": options,
+                    "correct": correct_letter,
+                    "explanation": explanation,
+                }
+            )
+
+    return quiz
+
+def generate_quiz(content: str):
+    """Ask Gemini to produce 5 MCQs in a strict, easy-to-parse format."""
+    if not API_KEY:
+        st.error("No Gemini API key found. Add it in Streamlit **Settings → Secrets** as `gemini_api_key`.")
         return []
 
-# --------------------
-# Streamlit UI
-# --------------------
-st.set_page_config(page_title="Trailhead Quiz Generator", layout="centered")
-st.title("📘 Trailhead Quiz Generator")
-st.write("Paste a Trailhead URL or text, and test your understanding with a quiz!")
+    prompt = f"""
+You are a strict quiz generator. Based on the content below, create **exactly 5** multiple-choice questions.
+Format each question EXACTLY like this:
 
-# Input method selection
-mode = st.radio("Choose input method:", ["Paste URL", "Paste Text"])
+1. Question text
+   A. option
+   B. option
+   C. option
+   D. option
+   Correct Answer: X
+   Explanation: one short sentence
 
-if "user_input" not in st.session_state:
-    st.session_state.user_input = ""
+Only produce the quiz in the format above. No extra commentary.
 
-# Input fields
-if mode == "Paste URL":
-    url = st.text_input("Enter Trailhead URL:", value=st.session_state.user_input)
-    if st.button("Clear"):
-        st.session_state.user_input = ""
-        st.rerun()
-else:
-    text_input = st.text_area("Paste content here:", value=st.session_state.user_input, height=200)
-    if st.button("Clear"):
-        st.session_state.user_input = ""
-        st.rerun()
+Content:
+{content}
+"""
 
-# Initialize session state
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        with st.spinner("Generating quiz..."):
+            result = model.generate_content(prompt)
+
+        raw = (result.text or "").strip()
+        if not raw:
+            st.error("Gemini returned an empty response. Try again or paste text instead of URL.")
+            return []
+
+        quiz = parse_quiz_from_text(raw)
+
+        if not quiz:
+            st.error("Could not parse the quiz output. Please try Generate New Quiz or paste shorter content.")
+        return quiz
+    except Exception as e:
+        st.error(f"Quiz generation error: {e}")
+        return []
+
+def clear_all_state():
+    """Fully reset inputs and quiz state."""
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    st.rerun()
+
+# ---------------------------
+# Session state init
+# ---------------------------
+if "input_mode" not in st.session_state:
+    st.session_state.input_mode = "Paste URL"
+if "page_text" not in st.session_state:
+    st.session_state.page_text = ""
 if "quiz" not in st.session_state:
     st.session_state.quiz = []
-if "user_answers" not in st.session_state:
-    st.session_state.user_answers = {}
+if "answers" not in st.session_state:
+    st.session_state.answers = {}
 if "submitted" not in st.session_state:
     st.session_state.submitted = False
 
+# ---------------------------
+# Input mode + fields
+# ---------------------------
+st.session_state.input_mode = st.radio("Choose input method:", ["Paste URL", "Paste Text"], horizontal=True)
+
+if st.session_state.input_mode == "Paste URL":
+    url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
+    c1, c2 = st.columns([1, 1])
+    with c1:
+        if st.button("Preview Page Text"):
+            if not url:
+                st.warning("Please enter a URL.")
+            else:
+                st.session_state.url = url
+                st.session_state.page_text = extract_text_from_url(url)
+                if st.session_state.page_text:
+                    st.success("Page text extracted. Scroll to preview below.")
+                else:
+                    st.warning("No text extracted. Try copying the page text manually.")
+    with c2:
+        if st.button("Clear Inputs"):
+            clear_all_state()
+
+    if st.session_state.page_text:
+        with st.expander("Preview extracted text"):
+            st.write(st.session_state.page_text)
+
+else:
+    st.session_state.page_text = st.text_area(
+        "Paste Trailhead page content here:",
+        value=st.session_state.get("page_text", ""),
+        height=240,
+    )
+    if st.button("Clear Inputs"):
+        clear_all_state()
+
+# ---------------------------
 # Generate quiz
+# ---------------------------
 if st.button("Generate Quiz"):
-    if mode == "Paste URL" and url:
-        content = extract_text_from_url(url)
-        st.session_state.user_input = url
-    elif mode == "Paste Text" and text_input:
-        content = text_input
-        st.session_state.user_input = text_input
+    if not st.session_state.page_text:
+        st.warning("Please provide content (paste text or preview URL first).")
     else:
-        st.warning("Please provide input.")
-        st.stop()
+        st.session_state.quiz = generate_quiz(st.session_state.page_text)
+        st.session_state.answers = {}
+        st.session_state.submitted = False
+        st.rerun()
 
-    st.session_state.quiz = generate_quiz(content)
-    st.session_state.user_answers = {}
-    st.session_state.submitted = False
-    st.rerun()
-
-# Show quiz
+# ---------------------------
+# Quiz UI
+# ---------------------------
 if st.session_state.quiz:
-    st.header("📝 Quiz")
+    st.write("### Quiz")
     for i, q in enumerate(st.session_state.quiz):
         st.write(f"**Q{i+1}: {q['question']}**")
-        st.session_state.user_answers[i] = st.radio(
-            f"Answer Q{i+1}", 
-            q["options"], 
-            key=f"q{i}"
+        # Show options as radio; display labels exactly as "A. ..." etc.
+        st.session_state.answers[i] = st.radio(
+            f"Select answer for Q{i+1}",
+            q["options"],
+            key=f"q{i}",
+            index=None,
         )
 
-    # Submit button
-    if st.button("Submit Answers"):
-        st.session_state.submitted = True
-        st.rerun()
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        if st.button("Submit Answers"):
+            st.session_state.submitted = True
+            st.rerun()
 
+    with c2:
+        if st.button("Retake Quiz"):
+            # Reset selections but keep same quiz
+            for i in range(len(st.session_state.quiz)):
+                st.session_state[f"q{i}"] = None
+            st.session_state.answers = {}
+            st.session_state.submitted = False
+            st.rerun()
+
+    with c3:
+        if st.button("Generate New Quiz"):
+            # Regenerate from the same source text
+            if st.session_state.page_text:
+                st.session_state.quiz = generate_quiz(st.session_state.page_text)
+                st.session_state.answers = {}
+                st.session_state.submitted = False
+                st.rerun()
+            else:
+                st.warning("No source content to regenerate from. Provide URL/text again.")
+
+# ---------------------------
 # Review mode
-if st.session_state.submitted:
-    st.header("✅ Review")
+# ---------------------------
+if st.session_state.submitted and st.session_state.quiz:
+    st.write("### 🔍 Review Mode")
     score = 0
     for i, q in enumerate(st.session_state.quiz):
-        user_answer = st.session_state.user_answers.get(i, "")
-        correct_answer = q["answer"]
-        if user_answer == correct_answer:
-            st.success(f"Q{i+1}: Correct ✅ ({user_answer})")
+        selected = st.session_state.answers.get(i)
+        correct_option = next((opt for opt in q["options"] if opt.startswith(f"{q['correct']}.")), None)
+        if selected == correct_option:
+            st.success(f"✅ Q{i+1}: Correct")
             score += 1
         else:
-            st.error(f"Q{i+1}: Incorrect ❌ (Your answer: {user_answer}, Correct: {correct_answer})")
-    st.info(f"Final Score: {score}/{len(st.session_state.quiz)}")
+            st.error(f"❌ Q{i+1}: Wrong. Correct answer: {correct_option}")
+        # Show explanation
+        st.info(f"**Explanation:** {q['explanation']}")
 
-    # Retake quiz (reset answers only)
-    if st.button("Retake Quiz"):
-        st.session_state.user_answers = {}
-        st.session_state.submitted = False
-        st.rerun()
-
-    # Generate new quiz (reset everything but keep input)
-    if st.button("Generate New Quiz"):
-        content = (
-            extract_text_from_url(st.session_state.user_input)
-            if mode == "Paste URL"
-            else st.session_state.user_input
-        )
-        st.session_state.quiz = generate_quiz(content)
-        st.session_state.user_answers = {}
-        st.session_state.submitted = False
-        st.rerun()
+    st.write(f"## 🎯 Your Score: {score}/{len(st.session_state.quiz)}")
