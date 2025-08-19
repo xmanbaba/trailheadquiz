@@ -36,7 +36,7 @@ with st.sidebar:
         "- Click **Preview Page Text** (for URL) to confirm extraction.\n"
         "- Click **Generate Quiz**.\n"
         "- Answer each question and click **Submit Answers**.\n"
-        "- Use **Retake Quiz** to try the same set again (options reshuffled).\n"
+        "- Use **Retake Quiz** to try the same set again (questions **and** options reshuffled).\n"
         "- Use **Generate New Quiz** for a different set from the same content.\n"
         "- **Clear Inputs** resets URL/text and quiz state."
     )
@@ -169,22 +169,6 @@ def _build_shuffled_quiz(original_quiz):
             if orig_correct_text is not None and txt == orig_correct_text:
                 new_correct_letter = letter
 
-        # fallback: if we couldn't locate correct_text match, try fallback deriving by position if lengths match
-        if new_correct_letter is None and q.get("correct"):
-            try:
-                orig_idx = ord(q["correct"]) - 65
-                if 0 <= orig_idx < len(opt_texts):
-                    # map original index-to-text then find it in shuffled
-                    target_text = q["options"][orig_idx]
-                    m3 = re.match(r"^[A-D][\).]\s*(.*)$", target_text)
-                    target_text = m3.group(1).strip() if m3 else target_text
-                    for idx, txt in enumerate(opt_texts):
-                        if txt == target_text:
-                            new_correct_letter = chr(65 + idx)
-                            break
-            except Exception:
-                new_correct_letter = None
-
         shuffled.append({
             "question": q["question"],
             "options": new_options,
@@ -269,7 +253,17 @@ if "submitted" not in st.session_state:
 st.session_state.input_mode = st.radio("Choose input method:", ["Paste URL", "Paste Text"], horizontal=True)
 
 if st.session_state.input_mode == "Paste URL":
-    url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
+    # Row: URL input + info toggle
+    c_url, c_info = st.columns([6, 1])
+    with c_url:
+        url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
+    with c_info:
+        with st.expander("ℹ️"):
+            st.caption(
+                "After pasting a URL, click **Preview Page Text** to fetch and confirm the exact content "
+                "that will be used. Pressing **Enter** only updates the field; it does **not** extract the page."
+            )
+
     c1, c2 = st.columns([1, 1])
     with c1:
         if st.button("Preview Page Text"):
@@ -311,6 +305,14 @@ if st.button("Generate Quiz"):
         st.session_state.quiz = result  # result = {"original": [...], "shuffled": [...]}
         st.session_state.answers = {}
         st.session_state.submitted = False
+        # clear any old radio widget keys
+        for i in range(50):
+            key = f"q{i}"
+            if key in st.session_state:
+                try:
+                    del st.session_state[key]
+                except Exception:
+                    pass
         st.rerun()
 
 # ---------------------------
@@ -323,12 +325,12 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
     for i, q in enumerate(shuffled):
         st.write(f"**Q{i+1}: {q['question']}**")
         # radio choices will be strings like "A. text", "B. text", ...
-        # Keep storing selection in answers dict keyed by index (as before)
+        # Force no preselection: index=None, and do NOT set a default in session_state
         st.session_state.answers[i] = st.radio(
             f"Select answer for Q{i+1}",
             q["options"],
             key=f"q{i}",
-            index=0 if (f"q{i}" in st.session_state and st.session_state.get(f"q{i}") in q["options"]) else 0
+            index=None,
         )
 
     c1, c2, c3 = st.columns(3)
@@ -339,17 +341,22 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
 
     with c2:
         if st.button("Retake Quiz"):
-            # Recreate shuffled display options from original (so we remove label-letters from previous shuffle)
+            # Reshuffle QUESTIONS order, then rebuild a fresh shuffled+relabeled set
             if st.session_state.quiz and "original" in st.session_state.quiz:
-                st.session_state.quiz["shuffled"] = _build_shuffled_quiz(st.session_state.quiz["original"])
+                # Make a shallow copy to avoid in-place order stickiness
+                orig = list(st.session_state.quiz["original"])
+                random.shuffle(orig)
+                st.session_state.quiz["shuffled"] = _build_shuffled_quiz(orig)
+
             # Remove radio widget keys so they rebuild with no preselection
-            for i in range(len(st.session_state.quiz.get("shuffled", []))):
+            for i in range(50):
                 key = f"q{i}"
                 if key in st.session_state:
                     try:
                         del st.session_state[key]
                     except Exception:
                         pass
+
             # Clear stored answers and submission state
             st.session_state.answers = {}
             st.session_state.submitted = False
