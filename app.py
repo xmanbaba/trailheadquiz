@@ -21,25 +21,25 @@ if API_KEY:
 # ---------------------------
 # Header + short description
 # ---------------------------
-st.title("Trailhead Quiz Generator 📝")
+st.title("Trailhead Quiz Generator 📝")   # FIX: Removed "Gemini Edition"
 st.write(
     "Paste a **Trailhead URL** or **content text**, then generate a quick quiz to check your understanding.\n\n"
     "**How it works:**\n"
-    "1) Provide a URL or paste the page text → 2) Click **Generate Quiz** → 3) Answer → 4) **Submit** to see your score → 5) **Retake** or **Generate New Quiz**."
+    "Provide content → Generate Quiz → Answer → Submit → Review → Retake or Generate New Quiz."
 )
 
 # Sidebar help
 with st.sidebar:
     st.header("How to use")
     st.markdown(
-        "- Choose **Paste URL** or **Paste Text**.\n"
-        "- Click **Preview Page Text** (for URL) to confirm extraction.\n"
-        "- Click **Generate Quiz**.\n"
-        "- Answer each question and click **Submit Answers**.\n"
-        "- Use **Retake Quiz** to try the same set again (options reshuffled).\n"
-        "- Use **Generate New Quiz** for a different set from the same content.\n"
-        "- **Clear Inputs** resets URL/text and quiz state."
-    )
+        "1. Choose **Paste URL** or **Paste Text**.\n"
+        "2. If using URL, click **Preview Page Text** to confirm extraction.\n"
+        "3. Click **Generate Quiz**.\n"
+        "4. Answer each question.\n"
+        "5. Click **Submit Answers** to see your score.\n"
+        "6. Use **Retake Quiz** to try again (options reshuffled).\n"
+        "7. Use **Generate New Quiz** for a different set."
+    )  # FIX: Numbered steps for clarity
     st.markdown("---")
     st.markdown("**Tip:** Some pages block scraping. If URL fails, copy & paste the content instead.")
 
@@ -50,8 +50,9 @@ def extract_text_from_url(url: str) -> str:
     """Best-effort extraction of readable text from a webpage."""
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                          "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/122.0.0.0 Safari/537.36"
         }
         resp = requests.get(url, headers=headers, timeout=25)
         resp.raise_for_status()
@@ -63,13 +64,23 @@ def extract_text_from_url(url: str) -> str:
             if text:
                 chunks.append(text)
         text = "\n".join(chunks).strip()
-        return text[:15000]
+        return text[:15000]  # limit length
     except Exception as e:
         st.error(f"Couldn't fetch the page: {e}")
         return ""
 
 def parse_quiz_from_text(raw_quiz: str):
-    """Parse Gemini output into list of questions with options, correct, explanation."""
+    """
+    Parse Gemini output in the numbered format:
+    1. Question
+       A. ...
+       B. ...
+       C. ...
+       D. ...
+       Correct Answer: X
+       Explanation: ...
+    Returns: list of {question, options (raw strings), correct (letter), explanation}
+    """
     parts = re.split(r"(?m)^\s*\d+\.\s+", raw_quiz)
     parts = [p.strip() for p in parts if p.strip()]
     quiz = []
@@ -78,8 +89,8 @@ def parse_quiz_from_text(raw_quiz: str):
         lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
         if not lines:
             continue
-        question_text = lines[0]
 
+        question_text = lines[0]
         options = []
         for ln in lines:
             m = re.match(r"^([A-D])[\).]\s*(.*)$", ln)
@@ -100,22 +111,28 @@ def parse_quiz_from_text(raw_quiz: str):
             explanation = explanation_line.split(":", 1)[1].strip()
 
         if question_text and options and correct_letter in {"A", "B", "C", "D"}:
-            quiz.append({
-                "question": question_text,
-                "options": options,
-                "correct": correct_letter,
-                "explanation": explanation,
-            })
+            quiz.append(
+                {
+                    "question": question_text,
+                    "options": options,
+                    "correct": correct_letter,
+                    "explanation": explanation,
+                }
+            )
+
     return quiz
 
 def _build_shuffled_quiz(original_quiz):
-    """Shuffle options but always relabel as A-D consistently."""
+    """Shuffle options but keep labels A–D consistent."""
     shuffled = []
     for q in original_quiz:
         opt_texts = []
         for opt in q["options"]:
             m = re.match(r"^[A-D][\).]\s*(.*)$", opt)
-            opt_texts.append(m.group(1).strip() if m else opt.strip())
+            if m:
+                opt_texts.append(m.group(1).strip())
+            else:
+                opt_texts.append(opt.strip())
 
         orig_correct_text = None
         if q.get("correct"):
@@ -127,12 +144,14 @@ def _build_shuffled_quiz(original_quiz):
                     break
 
         random.shuffle(opt_texts)
-        new_options, new_correct_letter = [], None
+
+        new_options = []
+        new_correct_letter = None
         for idx, txt in enumerate(opt_texts):
             letter = chr(65 + idx)
             labeled = f"{letter}. {txt}"
             new_options.append(labeled)
-            if orig_correct_text and txt == orig_correct_text:
+            if orig_correct_text is not None and txt == orig_correct_text:
                 new_correct_letter = letter
 
         shuffled.append({
@@ -144,7 +163,7 @@ def _build_shuffled_quiz(original_quiz):
     return shuffled
 
 def generate_quiz(content: str):
-    """Ask Gemini to produce 5 MCQs."""
+    """Ask Gemini to produce 5 MCQs in strict format."""
     if not API_KEY:
         st.error("No Gemini API key found. Add it in Streamlit **Settings → Secrets** as `gemini_api_key`.")
         return []
@@ -174,19 +193,21 @@ Content:
 
         raw = (result.text or "").strip()
         if not raw:
-            st.error("Gemini returned an empty response.")
+            st.error("Gemini returned an empty response. Try again or paste text instead of URL.")
             return []
 
         quiz = parse_quiz_from_text(raw)
         if not quiz:
-            st.error("Could not parse the quiz output.")
+            st.error("Could not parse the quiz output. Try again.")
             return []
+
         return {"original": quiz, "shuffled": _build_shuffled_quiz(quiz)}
     except Exception as e:
         st.error(f"Quiz generation error: {e}")
         return []
 
 def clear_all_state():
+    """Reset session state fully."""
     for k in list(st.session_state.keys()):
         try:
             del st.session_state[k]
@@ -214,13 +235,13 @@ if "submitted" not in st.session_state:
 st.session_state.input_mode = st.radio("Choose input method:", ["Paste URL", "Paste Text"], horizontal=True)
 
 if st.session_state.input_mode == "Paste URL":
-    col_url, col_info = st.columns([15, 1])
-    with col_url:
+    url_col, info_col = st.columns([15, 1])  # FIX: Small grey info icon beside URL
+    with url_col:
         url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
-    with col_info:
+    with info_col:
         st.markdown(
-            '<span title="After pasting a URL, click Preview Page Text to confirm content extraction. (More details in the sidebar)">ℹ️</span>',
-            unsafe_allow_html=True
+            '<span style="color: grey;" title="After pasting the URL, press **Preview Page Text** to confirm the page content. \nFor details, see How to use in the sidebar.">ℹ️</span>',
+            unsafe_allow_html=True,
         )
 
     c1, c2 = st.columns([1, 1])
@@ -234,7 +255,7 @@ if st.session_state.input_mode == "Paste URL":
                 if st.session_state.page_text:
                     st.success("Page text extracted. Scroll to preview below.")
                 else:
-                    st.warning("No text extracted.")
+                    st.warning("No text extracted. Try copying manually.")
     with c2:
         if st.button("Clear Inputs"):
             clear_all_state()
@@ -257,7 +278,7 @@ else:
 # ---------------------------
 if st.button("Generate Quiz"):
     if not st.session_state.page_text:
-        st.warning("Please provide content.")
+        st.warning("Please provide content first.")
     else:
         result = generate_quiz(st.session_state.page_text)
         st.session_state.quiz = result
@@ -278,6 +299,7 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
             f"Select answer for Q{i+1}",
             q["options"],
             key=f"q{i}",
+            index=None,  # FIX: Start with no preselected answer
         )
 
     c1, c2, c3 = st.columns(3)
@@ -285,6 +307,7 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
         if st.button("Submit Answers"):
             st.session_state.submitted = True
             st.rerun()
+
     with c2:
         if st.button("Retake Quiz"):
             if st.session_state.quiz and "original" in st.session_state.quiz:
@@ -292,10 +315,14 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
             for i in range(len(st.session_state.quiz.get("shuffled", []))):
                 key = f"q{i}"
                 if key in st.session_state:
-                    del st.session_state[key]
+                    try:
+                        del st.session_state[key]
+                    except Exception:
+                        pass
             st.session_state.answers = {}
             st.session_state.submitted = False
             st.rerun()
+
     with c3:
         if st.button("Generate New Quiz"):
             if st.session_state.page_text:
@@ -306,7 +333,10 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
                 for i in range(50):
                     key = f"q{i}"
                     if key in st.session_state:
-                        del st.session_state[key]
+                        try:
+                            del st.session_state[key]
+                        except Exception:
+                            pass
                 st.rerun()
             else:
                 st.warning("No source content to regenerate from.")
@@ -321,7 +351,7 @@ if st.session_state.submitted and st.session_state.quiz and "shuffled" in st.ses
     for i, q in enumerate(shuffled):
         selected = st.session_state.answers.get(i)
         correct_letter = q.get("correct")
-        correct_option = next((opt for opt in q["options"] if opt.startswith(f"{correct_letter}.")), None)
+        correct_option = next((opt for opt in q["options"] if opt.startswith(f"{correct_letter}.")), None) if correct_letter else None
         if selected == correct_option:
             st.success(f"✅ Q{i+1}: Correct")
             score += 1
