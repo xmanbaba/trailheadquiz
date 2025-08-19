@@ -21,14 +21,14 @@ if API_KEY:
 # ---------------------------
 # Header + short description
 # ---------------------------
-st.title("Trailhead Quiz Generator 📝")   # Removed "Gemini Edition"
+st.title("Trailhead Quiz Generator 📝")   # FIX: Removed "Gemini Edition"
 st.write(
     "Paste a **Trailhead URL** or **content text**, then generate a quick quiz to check your understanding.\n\n"
     "**How it works:**\n"
     "Provide content → Generate Quiz → Answer → Submit → Review → Retake or Generate New Quiz."
 )
 
-# Sidebar help
+# Sidebar help (numbered steps) ---------------------------
 with st.sidebar:
     st.header("How to use")
     st.markdown(
@@ -37,7 +37,7 @@ with st.sidebar:
         "3. Click **Generate Quiz**.\n"
         "4. Answer each question.\n"
         "5. Click **Submit Answers** to see your score.\n"
-        "6. Use **Retake Quiz** to try again (options reshuffled).\n"
+        "6. Use **Retake Quiz** to try again (questions + options reshuffled).  # FIX: Clarified behavior\n"
         "7. Use **Generate New Quiz** for a different set."
     )
     st.markdown("---")
@@ -70,7 +70,17 @@ def extract_text_from_url(url: str) -> str:
         return ""
 
 def parse_quiz_from_text(raw_quiz: str):
-    """Parse Gemini output into structured quiz format."""
+    """
+    Parse Gemini output in the numbered format:
+    1. Question
+       A. ...
+       B. ...
+       C. ...
+       D. ...
+       Correct Answer: X
+       Explanation: ...
+    Returns: list of {question, options (raw strings), correct (letter), explanation}
+    """
     parts = re.split(r"(?m)^\s*\d+\.\s+", raw_quiz)
     parts = [p.strip() for p in parts if p.strip()]
     quiz = []
@@ -113,9 +123,13 @@ def parse_quiz_from_text(raw_quiz: str):
     return quiz
 
 def _build_shuffled_quiz(original_quiz):
-    """Shuffle options but keep labels A–D consistent."""
+    """Shuffle both questions and options but keep labels A–D consistent.  # FIX"""
+    # Shuffle question order
+    shuffled_questions = original_quiz[:]  # copy
+    random.shuffle(shuffled_questions)     # FIX: shuffle question order
+
     shuffled = []
-    for q in original_quiz:
+    for q in shuffled_questions:
         opt_texts = []
         for opt in q["options"]:
             m = re.match(r"^[A-D][\).]\s*(.*)$", opt)
@@ -225,54 +239,98 @@ if "submitted" not in st.session_state:
 st.session_state.input_mode = st.radio("Choose input method:", ["Paste URL", "Paste Text"], horizontal=True)
 
 if st.session_state.input_mode == "Paste URL":
-    url_col, info_col = st.columns([15, 1])  
+    url_col, info_col = st.columns([15, 1])
     with url_col:
         url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
     with info_col:
-        # Tooltip effect on tap/click, auto-close after 7s
+        # FIX: Small grey info icon with JS/CSS tooltip that toggles on tap and auto-closes after 7s
         st.markdown(
             """
             <style>
-            .tooltip {
-                position: relative;
-                display: inline-block;
-                cursor: pointer;
-                color: grey;
-                font-size: 16px;
+            /* tooltip container */
+            .tt-container { position: relative; display:inline-block; }
+            .tt-icon { color: grey; font-size:16px; cursor: pointer; user-select: none; }
+            /* tooltip box */
+            .tt-box {
+              visibility: hidden;
+              opacity: 0;
+              width: 200px;
+              background-color: #f9f9f9;
+              color: #222;
+              text-align: left;
+              border-radius: 6px;
+              padding: 8px;
+              position: absolute;
+              z-index: 9999;
+              bottom: 140%;
+              left: 50%;
+              transform: translateX(-50%);
+              box-shadow: 0px 2px 8px rgba(0,0,0,0.12);
+              font-size: 12px;
+              transition: opacity 0.18s ease-in-out;
             }
-            .tooltip .tooltiptext {
-                visibility: hidden;
-                width: 240px;
-                background-color: #555;
-                color: #fff;
-                text-align: left;
-                border-radius: 6px;
-                padding: 8px;
-                position: absolute;
-                z-index: 1;
-                bottom: 125%;
-                left: 50%;
-                margin-left: -120px;
-                opacity: 0;
-                transition: opacity 0.3s;
-                font-size: 13px;
+            /* caret */
+            .tt-box::after {
+              content: "";
+              position: absolute;
+              top: 100%;
+              left: 50%;
+              margin-left: -6px;
+              border-width: 6px;
+              border-style: solid;
+              border-color: #f9f9f9 transparent transparent transparent;
             }
-            .tooltip.show .tooltiptext {
-                visibility: visible;
-                opacity: 1;
-            }
+            /* visible state */
+            .tt-visible { visibility: visible !important; opacity: 1 !important; }
             </style>
-            <div class="tooltip" id="infoIcon">ℹ️
-              <span class="tooltiptext">After pasting the URL, press **Preview Page Text** to confirm the page content.<br>For details, see How to use in the sidebar.</span>
+            <div class="tt-container">
+              <span id="ttIcon" class="tt-icon">ℹ️</span>
+              <div id="ttBox" class="tt-box">
+                Paste URL → press Preview Page Text<br>
+                (See sidebar for details)
+              </div>
             </div>
+
             <script>
-            const infoIcon = window.parent.document.getElementById("infoIcon");
-            if (infoIcon) {
-                infoIcon.addEventListener("click", function() {
-                    this.classList.add("show");
-                    setTimeout(() => this.classList.remove("show"), 7000);
-                });
-            }
+            (function() {
+              const icon = document.getElementById("ttIcon");
+              const box = document.getElementById("ttBox");
+              let hideTimer = null;
+              // show on hover (desktop)
+              icon.addEventListener("mouseenter", function(){ 
+                box.classList.add("tt-visible");
+                if (hideTimer) { clearTimeout(hideTimer); hideTimer = null;}
+              });
+              icon.addEventListener("mouseleave", function(){ 
+                // on desktop hide on mouseleave with small delay
+                hideTimer = setTimeout(()=>{ box.classList.remove("tt-visible"); hideTimer = null; }, 350);
+              });
+              // toggle on click/tap (mobile)
+              icon.addEventListener("click", function(e){
+                e.preventDefault();
+                if (box.classList.contains("tt-visible")) {
+                  box.classList.remove("tt-visible");
+                  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+                } else {
+                  box.classList.add("tt-visible");
+                  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+                  // auto-hide after 7 seconds (7000 ms)
+                  hideTimer = setTimeout(function(){
+                    box.classList.remove("tt-visible");
+                    hideTimer = null;
+                  }, 7000);
+                }
+              });
+              // also hide if user clicks anywhere else
+              document.addEventListener("click", function(ev){
+                if (!icon.contains(ev.target) && !box.contains(ev.target)) {
+                  if (box.classList.contains("tt-visible")) {
+                    box.classList.remove("tt-visible");
+                    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+                  }
+                }
+              });
+            })();
             </script>
             """,
             unsafe_allow_html=True,
@@ -333,7 +391,7 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
             f"Select answer for Q{i+1}",
             q["options"],
             key=f"q{i}",
-            index=None,
+            index=None,  # FIX: Start with no preselected answer
         )
 
     c1, c2, c3 = st.columns(3)
@@ -344,8 +402,10 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
 
     with c2:
         if st.button("Retake Quiz"):
+            # FIX: On retake, shuffle both questions and options (via _build_shuffled_quiz)
             if st.session_state.quiz and "original" in st.session_state.quiz:
                 st.session_state.quiz["shuffled"] = _build_shuffled_quiz(st.session_state.quiz["original"])
+            # Remove radio widget keys so they rebuild with no preselection
             for i in range(len(st.session_state.quiz.get("shuffled", []))):
                 key = f"q{i}"
                 if key in st.session_state:
