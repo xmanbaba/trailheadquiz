@@ -21,7 +21,7 @@ if API_KEY:
 # ---------------------------
 # Header + short description
 # ---------------------------
-st.title("Trailhead Quiz Generator 📝")   # FIX: Removed "Gemini Edition"
+st.title("Trailhead Quiz Generator 📝")   # Removed "Gemini Edition"
 st.write(
     "Paste a **Trailhead URL** or **content text**, then generate a quick quiz to check your understanding.\n\n"
     "**How it works:**\n"
@@ -39,7 +39,7 @@ with st.sidebar:
         "5. Click **Submit Answers** to see your score.\n"
         "6. Use **Retake Quiz** to try again (options reshuffled).\n"
         "7. Use **Generate New Quiz** for a different set."
-    )  # FIX: Numbered steps for clarity
+    )
     st.markdown("---")
     st.markdown("**Tip:** Some pages block scraping. If URL fails, copy & paste the content instead.")
 
@@ -70,17 +70,7 @@ def extract_text_from_url(url: str) -> str:
         return ""
 
 def parse_quiz_from_text(raw_quiz: str):
-    """
-    Parse Gemini output in the numbered format:
-    1. Question
-       A. ...
-       B. ...
-       C. ...
-       D. ...
-       Correct Answer: X
-       Explanation: ...
-    Returns: list of {question, options (raw strings), correct (letter), explanation}
-    """
+    """Parse Gemini output into structured quiz format."""
     parts = re.split(r"(?m)^\s*\d+\.\s+", raw_quiz)
     parts = [p.strip() for p in parts if p.strip()]
     quiz = []
@@ -235,12 +225,56 @@ if "submitted" not in st.session_state:
 st.session_state.input_mode = st.radio("Choose input method:", ["Paste URL", "Paste Text"], horizontal=True)
 
 if st.session_state.input_mode == "Paste URL":
-    url_col, info_col = st.columns([15, 1])  # FIX: Small grey info icon beside URL
+    url_col, info_col = st.columns([15, 1])  
     with url_col:
         url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
     with info_col:
+        # Tooltip effect on tap/click, auto-close after 7s
         st.markdown(
-            '<span style="color: grey;" title="After pasting the URL, press **Preview Page Text** to confirm the page content. \nFor details, see How to use in the sidebar.">ℹ️</span>',
+            """
+            <style>
+            .tooltip {
+                position: relative;
+                display: inline-block;
+                cursor: pointer;
+                color: grey;
+                font-size: 16px;
+            }
+            .tooltip .tooltiptext {
+                visibility: hidden;
+                width: 240px;
+                background-color: #555;
+                color: #fff;
+                text-align: left;
+                border-radius: 6px;
+                padding: 8px;
+                position: absolute;
+                z-index: 1;
+                bottom: 125%;
+                left: 50%;
+                margin-left: -120px;
+                opacity: 0;
+                transition: opacity 0.3s;
+                font-size: 13px;
+            }
+            .tooltip.show .tooltiptext {
+                visibility: visible;
+                opacity: 1;
+            }
+            </style>
+            <div class="tooltip" id="infoIcon">ℹ️
+              <span class="tooltiptext">After pasting the URL, press **Preview Page Text** to confirm the page content.<br>For details, see How to use in the sidebar.</span>
+            </div>
+            <script>
+            const infoIcon = window.parent.document.getElementById("infoIcon");
+            if (infoIcon) {
+                infoIcon.addEventListener("click", function() {
+                    this.classList.add("show");
+                    setTimeout(() => this.classList.remove("show"), 7000);
+                });
+            }
+            </script>
+            """,
             unsafe_allow_html=True,
         )
 
@@ -299,7 +333,7 @@ if st.session_state.quiz and "shuffled" in st.session_state.quiz:
             f"Select answer for Q{i+1}",
             q["options"],
             key=f"q{i}",
-            index=None,  # FIX: Start with no preselected answer
+            index=None,
         )
 
     c1, c2, c3 = st.columns(3)
