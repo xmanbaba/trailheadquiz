@@ -167,7 +167,7 @@ if "quiz" in st.session_state and st.session_state.get("quiz"):
                 st.session_state[f"q{i}"] = None
             st.session_state.answers = {}
             st.session_state.submitted = False
-            st.experimental_rerun()
+            st.rerun()
 
     with col3:
         if st.button("Generate New Quiz"):
