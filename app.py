@@ -19,7 +19,7 @@ if API_KEY:
     genai.configure(api_key=API_KEY)
 
 # ---------------------------
-# Header + short description
+# Header + short description (kept from the earlier design)
 # ---------------------------
 st.title("Trailhead Quiz Generator 📝 (Gemini Edition)")
 st.write(
@@ -63,13 +63,24 @@ def extract_text_from_url(url: str) -> str:
             if text:
                 chunks.append(text)
         text = "\n".join(chunks).strip()
+        # Trim very long pages to keep prompts reliable
         return text[:15000]
     except Exception as e:
         st.error(f"Couldn't fetch the page: {e}")
         return ""
 
 def parse_quiz_from_text(raw_quiz: str):
-    """Parse Gemini quiz output in the strict format."""
+    """
+    Parse Gemini output in the numbered format:
+    1. Question
+       A. ...
+       B. ...
+       C. ...
+       D. ...
+       Correct Answer: X
+       Explanation: ...
+    Returns: list of {question, options (raw strings), correct (letter), explanation}
+    """
     parts = re.split(r"(?m)^\s*\d+\.\s+", raw_quiz)
     parts = [p.strip() for p in parts if p.strip()]
     quiz = []
@@ -79,13 +90,17 @@ def parse_quiz_from_text(raw_quiz: str):
         if not lines:
             continue
 
+        # First non-empty line is the question
         question_text = lines[0]
+
+        # Options (accept 'A. ' or 'A) ')
         options = []
         for ln in lines:
             m = re.match(r"^([A-D])[\).]\s*(.*)$", ln)
             if m:
                 options.append(f"{m.group(1)}. {m.group(2)}")
 
+        # Correct answer letter
         correct_match = next((ln for ln in lines if ln.lower().startswith("correct answer")), None)
         correct_letter = None
         if correct_match and ":" in correct_match:
@@ -94,6 +109,7 @@ def parse_quiz_from_text(raw_quiz: str):
             if m2:
                 correct_letter = m2.group(1).upper()
 
+        # Explanation
         explanation_line = next((ln for ln in lines if ln.lower().startswith("explanation")), None)
         explanation = "No explanation provided."
         if explanation_line and ":" in explanation_line:
@@ -103,12 +119,79 @@ def parse_quiz_from_text(raw_quiz: str):
             quiz.append(
                 {
                     "question": question_text,
-                    "options": options,
+                    "options": options,   # keep original-lettered strings for now
                     "correct": correct_letter,
                     "explanation": explanation,
                 }
             )
+
     return quiz
+
+def _build_shuffled_quiz(original_quiz):
+    """
+    Build a shuffled version where:
+    - option texts are shuffled
+    - options are relabeled A-D consistently
+    - 'correct' updated to the new letter
+    Returns list of {"question","options": ["A. text"...], "correct": "A"/"B"..., "explanation"}
+    """
+    shuffled = []
+    for q in original_quiz:
+        # original options like "A. text"
+        opt_texts = []
+        for opt in q["options"]:
+            m = re.match(r"^[A-D][\).]\s*(.*)$", opt)
+            if m:
+                opt_texts.append(m.group(1).strip())
+            else:
+                opt_texts.append(opt.strip())
+
+        # find original correct text using original 'correct' letter
+        orig_correct_text = None
+        if q.get("correct"):
+            letter = q["correct"]
+            for opt in q["options"]:
+                if opt.startswith(f"{letter}.") or opt.startswith(f"{letter})"):
+                    m2 = re.match(r"^[A-D][\).]\s*(.*)$", opt)
+                    orig_correct_text = m2.group(1).strip() if m2 else opt[2:].strip()
+                    break
+
+        # shuffle option texts
+        random.shuffle(opt_texts)
+
+        # re-label as A., B., C., D.
+        new_options = []
+        new_correct_letter = None
+        for idx, txt in enumerate(opt_texts):
+            letter = chr(65 + idx)
+            labeled = f"{letter}. {txt}"
+            new_options.append(labeled)
+            if orig_correct_text is not None and txt == orig_correct_text:
+                new_correct_letter = letter
+
+        # fallback: if we couldn't locate correct_text match, try fallback deriving by position if lengths match
+        if new_correct_letter is None and q.get("correct"):
+            try:
+                orig_idx = ord(q["correct"]) - 65
+                if 0 <= orig_idx < len(opt_texts):
+                    # map original index-to-text then find it in shuffled
+                    target_text = q["options"][orig_idx]
+                    m3 = re.match(r"^[A-D][\).]\s*(.*)$", target_text)
+                    target_text = m3.group(1).strip() if m3 else target_text
+                    for idx, txt in enumerate(opt_texts):
+                        if txt == target_text:
+                            new_correct_letter = chr(65 + idx)
+                            break
+            except Exception:
+                new_correct_letter = None
+
+        shuffled.append({
+            "question": q["question"],
+            "options": new_options,
+            "correct": new_correct_letter,
+            "explanation": q.get("explanation", "No explanation provided.")
+        })
+    return shuffled
 
 def generate_quiz(content: str):
     """Ask Gemini to produce 5 MCQs in a strict, easy-to-parse format."""
@@ -128,9 +211,12 @@ Format each question EXACTLY like this:
    Correct Answer: X
    Explanation: one short sentence
 
+Only produce the quiz in the format above. No extra commentary.
+
 Content:
 {content}
 """
+
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
         with st.spinner("Generating quiz..."):
@@ -142,9 +228,14 @@ Content:
             return []
 
         quiz = parse_quiz_from_text(raw)
+
         if not quiz:
-            st.error("Could not parse the quiz output. Try Generate New Quiz or paste shorter content.")
-        return quiz
+            st.error("Could not parse the quiz output. Please try Generate New Quiz or paste shorter content.")
+            return []
+
+        # Build a shuffled, labeled version that keeps letters A-D consistent
+        shuffled = _build_shuffled_quiz(quiz)
+        return {"original": quiz, "shuffled": shuffled}
     except Exception as e:
         st.error(f"Quiz generation error: {e}")
         return []
@@ -152,7 +243,10 @@ Content:
 def clear_all_state():
     """Fully reset inputs and quiz state."""
     for k in list(st.session_state.keys()):
-        del st.session_state[k]
+        try:
+            del st.session_state[k]
+        except Exception:
+            pass
     st.rerun()
 
 # ---------------------------
@@ -163,7 +257,7 @@ if "input_mode" not in st.session_state:
 if "page_text" not in st.session_state:
     st.session_state.page_text = ""
 if "quiz" not in st.session_state:
-    st.session_state.quiz = []
+    st.session_state.quiz = {}
 if "answers" not in st.session_state:
     st.session_state.answers = {}
 if "submitted" not in st.session_state:
@@ -212,32 +306,29 @@ if st.button("Generate Quiz"):
     if not st.session_state.page_text:
         st.warning("Please provide content (paste text or preview URL first).")
     else:
-        st.session_state.quiz = generate_quiz(st.session_state.page_text)
+        result = generate_quiz(st.session_state.page_text)
+        # store both original parse and shuffled display version
+        st.session_state.quiz = result  # result = {"original": [...], "shuffled": [...]}
         st.session_state.answers = {}
         st.session_state.submitted = False
         st.rerun()
 
 # ---------------------------
-# Quiz UI
+# Quiz UI (display using shuffled, labeled options)
 # ---------------------------
-if st.session_state.quiz:
+if st.session_state.quiz and "shuffled" in st.session_state.quiz:
     st.write("### Quiz")
+    shuffled = st.session_state.quiz["shuffled"]
 
-    # Randomize options once when quiz is loaded or retaken
-    if "shuffled_quiz" not in st.session_state:
-        st.session_state.shuffled_quiz = []
-        for q in st.session_state.quiz:
-            options = q["options"][:]
-            random.shuffle(options)
-            st.session_state.shuffled_quiz.append({**q, "options": options})
-
-    for i, q in enumerate(st.session_state.shuffled_quiz):
+    for i, q in enumerate(shuffled):
         st.write(f"**Q{i+1}: {q['question']}**")
+        # radio choices will be strings like "A. text", "B. text", ...
+        # Keep storing selection in answers dict keyed by index (as before)
         st.session_state.answers[i] = st.radio(
             f"Select answer for Q{i+1}",
             q["options"],
             key=f"q{i}",
-            index=None,
+            index=0 if (f"q{i}" in st.session_state and st.session_state.get(f"q{i}") in q["options"]) else 0
         )
 
     c1, c2, c3 = st.columns(3)
@@ -248,14 +339,18 @@ if st.session_state.quiz:
 
     with c2:
         if st.button("Retake Quiz"):
-            # Reshuffle options + reset answers
-            st.session_state.shuffled_quiz = []
-            for q in st.session_state.quiz:
-                options = q["options"][:]
-                random.shuffle(options)
-                st.session_state.shuffled_quiz.append({**q, "options": options})
-            for i in range(len(st.session_state.quiz)):
-                st.session_state[f"q{i}"] = None
+            # Recreate shuffled display options from original (so we remove label-letters from previous shuffle)
+            if st.session_state.quiz and "original" in st.session_state.quiz:
+                st.session_state.quiz["shuffled"] = _build_shuffled_quiz(st.session_state.quiz["original"])
+            # Remove radio widget keys so they rebuild with no preselection
+            for i in range(len(st.session_state.quiz.get("shuffled", []))):
+                key = f"q{i}"
+                if key in st.session_state:
+                    try:
+                        del st.session_state[key]
+                    except Exception:
+                        pass
+            # Clear stored answers and submission state
             st.session_state.answers = {}
             st.session_state.submitted = False
             st.rerun()
@@ -263,10 +358,18 @@ if st.session_state.quiz:
     with c3:
         if st.button("Generate New Quiz"):
             if st.session_state.page_text:
-                st.session_state.quiz = generate_quiz(st.session_state.page_text)
-                st.session_state.shuffled_quiz = None
+                result = generate_quiz(st.session_state.page_text)
+                st.session_state.quiz = result
                 st.session_state.answers = {}
                 st.session_state.submitted = False
+                # clear old answer widget keys
+                for i in range(50):
+                    key = f"q{i}"
+                    if key in st.session_state:
+                        try:
+                            del st.session_state[key]
+                        except Exception:
+                            pass
                 st.rerun()
             else:
                 st.warning("No source content to regenerate from. Provide URL/text again.")
@@ -274,17 +377,20 @@ if st.session_state.quiz:
 # ---------------------------
 # Review mode
 # ---------------------------
-if st.session_state.submitted and st.session_state.quiz:
+if st.session_state.submitted and st.session_state.quiz and "shuffled" in st.session_state.quiz:
     st.write("### 🔍 Review Mode")
     score = 0
-    for i, q in enumerate(st.session_state.shuffled_quiz):
+    shuffled = st.session_state.quiz["shuffled"]
+    for i, q in enumerate(shuffled):
         selected = st.session_state.answers.get(i)
-        correct_option = next((opt for opt in q["options"] if opt.startswith(f"{q['correct']}.")), None)
+        # selected is like "A. text" or None
+        correct_letter = q.get("correct")
+        correct_option = next((opt for opt in q["options"] if opt.startswith(f"{correct_letter}.")), None) if correct_letter else None
         if selected == correct_option:
             st.success(f"✅ Q{i+1}: Correct")
             score += 1
         else:
             st.error(f"❌ Q{i+1}: Wrong. Correct answer: {correct_option}")
-        st.info(f"**Explanation:** {q['explanation']}")
-
-    st.write(f"## 🎯 Your Score: {score}/{len(st.session_state.quiz)}")
+        # Show explanation
+        st.info(f"**Explanation:** {q.get('explanation', 'No explanation provided.')}")
+    st.write(f"## 🎯 Your Score: {score}/{len(shuffled)}")
