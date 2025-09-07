@@ -4,78 +4,226 @@ import random
 import requests
 from bs4 import BeautifulSoup
 import streamlit as st
-import google.generativeai as genai
 import time
+
+# Multiple AI providers support
+try:
+    import google.generativeai as genai
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
+try:
+    import openai
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
 
 # ---------------------------
 # Page config
 # ---------------------------
 st.set_page_config(
-    page_title="Trailhead Quiz Generator", 
+    page_title="Multi-AI Quiz Generator", 
     layout="centered",
     initial_sidebar_state="expanded"
 )
 
 # ---------------------------
-# API key with better error handling
+# API Configuration
 # ---------------------------
-API_KEY = st.secrets.get("gemini_api_key", os.getenv("GEMINI_API_KEY"))
-if API_KEY:
-    try:
-        genai.configure(api_key=API_KEY)
-    except Exception as e:
-        st.error(f"Failed to configure Gemini API: {e}")
-        API_KEY = None
+def configure_ai_providers():
+    """Configure available AI providers"""
+    providers = {}
+    
+    # Gemini API
+    if GEMINI_AVAILABLE:
+        gemini_key = st.secrets.get("gemini_api_key", os.getenv("GEMINI_API_KEY"))
+        if gemini_key:
+            try:
+                genai.configure(api_key=gemini_key)
+                providers["Gemini"] = {"key": gemini_key, "status": "✅ Active"}
+            except Exception as e:
+                providers["Gemini"] = {"key": None, "status": f"❌ Error: {e}"}
+        else:
+            providers["Gemini"] = {"key": None, "status": "❌ No API key"}
+    
+    # OpenAI API (for comparison)
+    if OPENAI_AVAILABLE:
+        openai_key = st.secrets.get("openai_api_key", os.getenv("OPENAI_API_KEY"))
+        if openai_key:
+            try:
+                openai.api_key = openai_key
+                providers["OpenAI"] = {"key": openai_key, "status": "✅ Active"}
+            except Exception as e:
+                providers["OpenAI"] = {"key": None, "status": f"❌ Error: {e}"}
+        else:
+            providers["OpenAI"] = {"key": None, "status": "❌ No API key"}
+    
+    # Moonshot (Kimi) API - Free tier with high limits
+    kimi_key = st.secrets.get("kimi_api_key", os.getenv("KIMI_API_KEY"))
+    if kimi_key:
+        providers["Kimi (Moonshot)"] = {"key": kimi_key, "status": "✅ Active"}
+    else:
+        providers["Kimi (Moonshot)"] = {"key": None, "status": "❌ No API key"}
+    
+    return providers
 
 # ---------------------------
-# Header + short description
+# Header
 # ---------------------------
-st.title("Trailhead Quiz Generator 📝")
+st.title("Multi-AI Quiz Generator 🤖")
 st.write(
-    "Paste a **Trailhead URL** or **content text**, then generate a quick quiz to check your understanding.\n\n"
-    "**How it works:**\n"
-    "Provide content → Generate Quiz → Answer → Submit → Review → Retake or Generate New Quiz."
+    "Generate quizzes using multiple AI providers. Automatically switches to available providers when quota limits are reached.\n\n"
+    "**Supported AI Providers:**\n"
+    "- 🔥 **Gemini**: 50-100 requests/day (free)\n"
+    "- 🌙 **Kimi (Moonshot)**: Higher free limits\n"
+    "- 🤖 **OpenAI**: Paid (more reliable)\n\n"
+    "⚠️ **Note**: Each quiz generates **5 questions**. Free tier users should monitor usage to avoid quota limits."
 )
 
-# Sidebar help (numbered steps) ---------------------------
+# ---------------------------
+# Sidebar - AI Provider Status
+# ---------------------------
+providers = configure_ai_providers()
+
 with st.sidebar:
-    st.header("How to use")
-    st.markdown(
-        "1. Choose **Paste URL** or **Paste Text**.\n"
-        "2. If using URL, click **Preview Page Text** to confirm extraction.\n"
-        "3. Click **Generate Quiz**.\n"
-        "4. Answer each question.\n"
-        "5. Click **Submit Answers** to see your score.\n"
-        "6. Use **Retake Quiz** to try again (questions + options reshuffled).\n"
-        "7. Use **Generate New Quiz** for a different set."
-    )
-    st.markdown("---")
-    st.markdown("**Tip:** Some pages block scraping. If URL fails, copy & paste the content instead.")
+    st.header("🤖 AI Provider Status")
     
-    # API status indicator
-    if API_KEY:
-        st.success("✅ Gemini API configured")
+    available_providers = []
+    for provider, config in providers.items():
+        if provider == "Gemini":
+            # Enhanced Gemini status with quota info
+            if config['key']:
+                st.write(f"**{provider}**: {config['status']}")
+                st.caption("📊 Free Tier: 50-100 requests/day | 5-15 requests/minute")
+                st.caption("⏰ Quota resets at midnight Pacific time")
+                available_providers.append(provider)
+            else:
+                st.write(f"**{provider}**: {config['status']}")
+                st.caption("❌ Add gemini_api_key in Streamlit Secrets")
+        else:
+            st.write(f"**{provider}**: {config['status']}")
+            if config['key']:
+                available_providers.append(provider)
+    
+    if not available_providers:
+        st.error("❌ No AI providers configured!")
+        st.info("""
+        **Setup Instructions:**
+        
+        Add API keys in Streamlit Settings → Secrets:
+        
+        ```toml
+        gemini_api_key = "your-gemini-key"
+        kimi_api_key = "your-kimi-key" 
+        openai_api_key = "your-openai-key"
+        ```
+        """)
     else:
-        st.error("❌ Gemini API key missing")
-        st.info("Add `gemini_api_key` in Streamlit Settings → Secrets")
+        st.success(f"✅ {len(available_providers)} provider(s) ready")
+        
+        # Provider selection with Gemini preference and warning
+        selected_provider = st.selectbox(
+            "Choose AI Provider:",
+            available_providers,
+            help="Gemini: Limited free tier but reliable. Alternatives: Higher free limits."
+        )
+        
+        # Special guidance for Gemini users
+        if selected_provider == "Gemini":
+            st.info("""
+            🔥 **Gemini Tips:**
+            - 50-100 requests/day (free tier)
+            - Resets at midnight PT
+            - For more usage: Enable billing for 1000+ requests/day
+            """)
+            
+            # Show upgrade path
+            st.markdown("""
+            💡 **Need more requests?** 
+            
+            [📈 Upgrade to Paid Tier](https://aistudio.google.com/apikey) for:
+            - 1,000+ requests/day
+            - Higher rate limits
+            - Priority access
+            """)
+        else:
+            st.success(f"✅ Using {selected_provider} - Better free tier limits!")
+    
+    st.markdown("---")
+    
+    # Instructions with Gemini education
+    st.header("📋 How to use")
+    st.markdown(
+        "1. Choose your AI provider above\n"
+        "2. Paste URL or text content\n"
+        "3. Generate quiz (5 questions)\n"
+        "4. Answer questions\n"
+        "5. Get your score!\n\n"
+        "💡 **Multiple providers** = More daily usage!"
+    )
+    
+    # Gemini-specific education
+    with st.expander("🔥 Gemini Free Tier Guide"):
+        st.markdown("""
+        **Current Limits (2025):**
+        - Gemini 1.5 Flash: 15 RPM, 50 RPD
+        - Gemini 2.5 Pro: 5 RPM, 100 RPD
+        - Resets: Midnight Pacific Time
+        
+        **If Quota Exceeded:**
+        1. ⏰ Wait for reset (midnight PT)
+        2. 🔑 Create new API key in new project
+        3. 💳 Enable billing ($1+ = Tier 1)
+        4. 🌙 Try Kimi provider
+        
+        **Tier 1 Benefits:**
+        - 1,000+ requests/day
+        - 150+ requests/minute
+        - Better reliability
+        """)
+    
+    # API Key Setup Guide
+    with st.expander("🔑 Free API Keys Setup"):
+        st.markdown("""
+        **Fresh Gemini Key:**
+        1. Visit: https://aistudio.google.com/apikey
+        2. "Create API key in NEW project"
+        3. Fresh quota: 50-100 requests/day
+        
+        **Kimi (Moonshot)** - High free limits:
+        1. Visit: https://platform.moonshot.cn/
+        2. Sign up & get free tokens
+        3. Higher daily limits than Gemini
+        """)
+    
+    # Quota management tips
+    with st.expander("📊 Managing Quotas"):
+        st.markdown("""
+        **Best Practices:**
+        - Use shorter content (under 5000 chars)
+        - Space out quiz generations
+        - Set up multiple providers
+        - Monitor usage in Google Cloud Console
+        
+        **When to Upgrade:**
+        - Regular daily usage
+        - Multiple users
+        - Production applications
+        - Need reliability
+        """)
 
 # ---------------------------
-# Utilities with better error handling
+# Utility Functions
 # ---------------------------
 def extract_text_from_url(url: str) -> tuple[str, str]:
-    """
-    Extract readable text from a webpage.
-    Returns: (text_content, error_message)
-    """
+    """Extract text from URL"""
     try:
-        # Validate URL format
         if not url.startswith(('http://', 'https://')):
             return "", "Please enter a valid URL starting with http:// or https://"
         
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
             "Accept-Encoding": "gzip, deflate",
@@ -109,7 +257,7 @@ def extract_text_from_url(url: str) -> tuple[str, str]:
         if not text:
             return "", "No readable content found on this page. Try copying the content manually."
             
-        return text[:15000], ""  # limit length, no error
+        return text[:8000], ""  # limit length, no error
         
     except requests.exceptions.Timeout:
         return "", "Request timed out. The website may be slow or unresponsive."
@@ -121,17 +269,7 @@ def extract_text_from_url(url: str) -> tuple[str, str]:
         return "", f"Unexpected error: {str(e)}"
 
 def parse_quiz_from_text(raw_quiz: str):
-    """
-    Parse Gemini output in the numbered format:
-    1. Question
-       A. ...
-       B. ...
-       C. ...
-       D. ...
-       Correct Answer: X
-       Explanation: ...
-    Returns: list of {question, options (raw strings), correct (letter), explanation}
-    """
+    """Parse quiz from AI response"""
     parts = re.split(r"(?m)^\s*\d+\.\s+", raw_quiz)
     parts = [p.strip() for p in parts if p.strip()]
     quiz = []
@@ -148,7 +286,7 @@ def parse_quiz_from_text(raw_quiz: str):
             if m:
                 options.append(f"{m.group(1)}. {m.group(2)}")
 
-        correct_match = next((ln for ln in lines if ln.lower().startswith("correct answer")), None)
+        correct_match = next((ln for ln in lines if "correct" in ln.lower()), None)
         correct_letter = None
         if correct_match and ":" in correct_match:
             candidate = correct_match.split(":", 1)[1].strip()
@@ -156,29 +294,26 @@ def parse_quiz_from_text(raw_quiz: str):
             if m2:
                 correct_letter = m2.group(1).upper()
 
-        explanation_line = next((ln for ln in lines if ln.lower().startswith("explanation")), None)
+        explanation_line = next((ln for ln in lines if "explanation" in ln.lower()), None)
         explanation = "No explanation provided."
         if explanation_line and ":" in explanation_line:
             explanation = explanation_line.split(":", 1)[1].strip()
 
-        if question_text and len(options) >= 3 and correct_letter in {"A", "B", "C", "D"}:
-            quiz.append(
-                {
-                    "question": question_text,
-                    "options": options,
-                    "correct": correct_letter,
-                    "explanation": explanation,
-                }
-            )
+        if question_text and len(options) >= 3 and correct_letter:
+            quiz.append({
+                "question": question_text,
+                "options": options,
+                "correct": correct_letter,
+                "explanation": explanation,
+            })
 
     return quiz
 
-def _build_shuffled_quiz(original_quiz):
-    """Shuffle both questions and options but keep labels A–D consistent."""
+def shuffle_quiz(original_quiz):
+    """Shuffle questions and options"""
     if not original_quiz:
         return []
         
-    # Shuffle question order
     shuffled_questions = original_quiz[:]
     random.shuffle(shuffled_questions)
 
@@ -189,14 +324,12 @@ def _build_shuffled_quiz(original_quiz):
             m = re.match(r"^[A-D][\).]\s*(.*)$", opt)
             if m:
                 opt_texts.append(m.group(1).strip())
-            else:
-                opt_texts.append(opt.strip())
 
         orig_correct_text = None
         if q.get("correct"):
             letter = q["correct"]
             for opt in q["options"]:
-                if opt.startswith(f"{letter}.") or opt.startswith(f"{letter})"):
+                if opt.startswith(f"{letter}."):
                     m2 = re.match(r"^[A-D][\).]\s*(.*)$", opt)
                     orig_correct_text = m2.group(1).strip() if m2 else opt[2:].strip()
                     break
@@ -207,123 +340,213 @@ def _build_shuffled_quiz(original_quiz):
         new_correct_letter = None
         for idx, txt in enumerate(opt_texts):
             letter = chr(65 + idx)
-            labeled = f"{letter}. {txt}"
-            new_options.append(labeled)
-            if orig_correct_text is not None and txt == orig_correct_text:
+            new_options.append(f"{letter}. {txt}")
+            if orig_correct_text and txt == orig_correct_text:
                 new_correct_letter = letter
 
         shuffled.append({
             "question": q["question"],
             "options": new_options,
             "correct": new_correct_letter,
-            "explanation": q.get("explanation", "No explanation provided.")
+            "explanation": q["explanation"]
         })
     return shuffled
 
-def generate_quiz(content: str):
-    """Ask Gemini to produce 5 MCQs in strict format with retry logic."""
-    if not API_KEY:
-        st.error("No Gemini API key found. Add it in Streamlit **Settings → Secrets** as `gemini_api_key`.")
-        return []
+# ---------------------------
+# AI Provider Functions
+# ---------------------------
+def generate_with_gemini(content: str):
+    """Generate quiz using Gemini with enhanced error handling"""
+    try:
+        model = genai.GenerativeModel("gemini-1.5-flash")
+        prompt = f"""Create exactly 5 multiple-choice questions from this content:
 
-    if not content or len(content.strip()) < 50:
-        st.error("Content is too short to generate a meaningful quiz. Please provide more content.")
-        return []
+{content[:4000]}
 
-    prompt = f"""
-You are a strict quiz generator. Based on the content below, create **exactly 5** multiple-choice questions.
-Format each question EXACTLY like this:
+Format:
+1. Question
+   A. option
+   B. option  
+   C. option
+   D. option
+   Correct Answer: X
+   Explanation: brief explanation
 
+Only return the quiz, no extra text."""
+
+        result = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.7,
+                top_p=0.8,
+                top_k=40,
+                max_output_tokens=2048,
+            )
+        )
+        return result.text, None
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "quota" in error_msg or "limit" in error_msg or "exceeded" in error_msg:
+            return None, """🚫 **Gemini Quota Exceeded!**
+            
+**Free Tier Limits Reached:**
+- Daily: 50-100 requests per day
+- Per minute: 5-15 requests per minute
+
+**Solutions:**
+1. ⏰ **Wait**: Quotas reset at midnight Pacific time
+2. 🔑 **New API Key**: Create in new Google Cloud project
+3. 💳 **Upgrade**: Enable billing for 1000+ daily requests
+4. 🌙 **Switch**: Try Kimi provider
+
+**Upgrade Link**: https://aistudio.google.com/apikey"""
+        elif "403" in error_msg or "forbidden" in error_msg:
+            return None, "🔑 API key invalid or lacks permissions. Check your Gemini API key."
+        else:
+            return None, f"Gemini error: {str(e)}"
+
+def generate_with_kimi(content: str, api_key: str):
+    """Generate quiz using Kimi (Moonshot) API"""
+    try:
+        url = "https://api.moonshot.cn/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        prompt = f"""Create exactly 5 multiple-choice questions from this content:
+
+{content[:4000]}
+
+Format each question exactly like this:
 1. Question text
    A. option
    B. option
    C. option
    D. option
    Correct Answer: X
-   Explanation: one short sentence
+   Explanation: brief explanation
 
-Make sure questions test understanding of key concepts. Only produce the quiz in the format above. No extra commentary.
+Only return the quiz, no extra text."""
 
-Content:
-{content[:10000]}
-"""
-
-    max_retries = 3
-    for attempt in range(max_retries):
-        try:
-            model = genai.GenerativeModel("gemini-1.5-flash")
-            with st.spinner(f"Generating quiz... (attempt {attempt + 1}/{max_retries})"):
-                result = model.generate_content(
-                    prompt,
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.7,
-                        top_p=0.8,
-                        top_k=40,
-                        max_output_tokens=2048,
-                    )
-                )
-
-            raw = (result.text or "").strip()
-            if not raw:
-                if attempt < max_retries - 1:
-                    st.warning(f"Empty response on attempt {attempt + 1}. Retrying...")
-                    time.sleep(1)
-                    continue
-                else:
-                    st.error("Gemini returned empty responses. Please try again later.")
-                    return []
-
-            quiz = parse_quiz_from_text(raw)
-            if not quiz:
-                if attempt < max_retries - 1:
-                    st.warning(f"Could not parse quiz on attempt {attempt + 1}. Retrying...")
-                    time.sleep(1)
-                    continue
-                else:
-                    st.error("Could not parse quiz output after multiple attempts. Please try again.")
-                    return []
-
-            if len(quiz) < 3:
-                if attempt < max_retries - 1:
-                    st.warning(f"Only {len(quiz)} questions generated on attempt {attempt + 1}. Retrying...")
-                    time.sleep(1)
-                    continue
-                else:
-                    st.warning(f"Only generated {len(quiz)} questions. Proceeding anyway.")
-
-            return {"original": quiz, "shuffled": _build_shuffled_quiz(quiz)}
+        data = {
+            "model": "moonshot-v1-8k",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 1500
+        }
+        
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        if response.status_code == 200:
+            result = response.json()
+            return result["choices"][0]["message"]["content"], None
+        else:
+            return None, f"Kimi API error: {response.status_code}"
             
-        except Exception as e:
-            error_msg = str(e)
-            if "403" in error_msg or "forbidden" in error_msg.lower():
-                st.error("API access forbidden. Please check your API key and quota.")
-                return []
-            elif "quota" in error_msg.lower() or "limit" in error_msg.lower():
-                st.error("API quota exceeded. Please try again later.")
-                return []
-            elif attempt < max_retries - 1:
-                st.warning(f"Error on attempt {attempt + 1}: {error_msg}. Retrying...")
-                time.sleep(2 ** attempt)  # Exponential backoff
-                continue
-            else:
-                st.error(f"Quiz generation failed after {max_retries} attempts: {error_msg}")
-                return []
+    except Exception as e:
+        return None, f"Kimi error: {str(e)}"
 
-    return []
+def generate_with_openai(content: str, api_key: str):
+    """Generate quiz using OpenAI"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        prompt = f"""Create exactly 5 multiple-choice questions from this content:
 
-def clear_all_state():
-    """Reset session state fully."""
-    keys_to_keep = {'input_mode'}  # Keep input mode selection
-    for k in list(st.session_state.keys()):
-        if k not in keys_to_keep:
-            try:
-                del st.session_state[k]
-            except Exception:
-                pass
-    st.rerun()
+{content[:4000]}
+
+Format each question exactly like this:
+1. Question text
+   A. option
+   B. option
+   C. option
+   D. option
+   Correct Answer: X
+   Explanation: brief explanation
+
+Only return the quiz, no extra text."""
+
+        data = {
+            "model": "gpt-3.5-turbo",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.7,
+            "max_tokens": 1500
+        }
+        
+        response = requests.post("https://api.openai.com/v1/chat/completions", 
+                               headers=headers, json=data, timeout=30)
+        if response.status_code == 200:
+            result = response.json()
+            return result["choices"][0]["message"]["content"], None
+        else:
+            return None, f"OpenAI error: {response.status_code}"
+            
+    except Exception as e:
+        return None, f"OpenAI error: {str(e)}"
+
+def generate_quiz(content: str, provider: str, providers: dict):
+    """Generate quiz using selected provider"""
+    if not content or len(content.strip()) < 50:
+        st.error("Content too short. Please provide more content.")
+        return []
+    
+    with st.spinner(f"Generating quiz using {provider}..."):
+        if provider == "Gemini" and GEMINI_AVAILABLE:
+            raw_quiz, error = generate_with_gemini(content)
+        elif provider == "Kimi (Moonshot)":
+            raw_quiz, error = generate_with_kimi(content, providers[provider]["key"])
+        elif provider == "OpenAI":
+            raw_quiz, error = generate_with_openai(content, providers[provider]["key"])
+        else:
+            return []
+    
+    if error:
+        # Enhanced error display for Gemini
+        if provider == "Gemini" and ("quota" in error.lower() or "exceeded" in error.lower()):
+            st.error("❌ **Gemini Quota Exceeded**")
+            st.info("""
+            **Free Tier Limits Reached:**
+            - **Daily limit**: 50-100 requests per day
+            - **Per minute**: 5-15 requests per minute
+            
+            **Immediate Solutions:**
+            1. ⏰ **Wait**: Quotas reset at midnight Pacific time
+            2. 🔑 **New Key**: Create API key in new Google Cloud project
+            3. 🌙 **Switch Provider**: Try Kimi (select above)
+            
+            **Long-term Solution:**
+            💳 **Enable Billing**: $1+ spending = 1000+ requests/day
+            
+            [🚀 Upgrade Here](https://aistudio.google.com/apikey)
+            """)
+        else:
+            st.error(f"❌ {error}")
+        
+        # Suggest alternatives for any quota error
+        if "quota" in error.lower() or "exceeded" in error.lower() or "limit" in error.lower():
+            other_providers = [p for p in providers.keys() if p != provider and providers[p]["key"]]
+            if other_providers:
+                st.success(f"💡 **Try switching to**: {', '.join(other_providers)}")
+                st.info("These providers have higher free tier limits!")
+        return []
+    
+    if not raw_quiz:
+        st.error("Empty response from AI provider.")
+        return []
+    
+    quiz = parse_quiz_from_text(raw_quiz)
+    if not quiz:
+        st.error("Could not parse quiz. Please try again.")
+        return []
+    
+    st.success(f"✅ Generated {len(quiz)} questions using {provider}!")
+    return {"original": quiz, "shuffled": shuffle_quiz(quiz)}
 
 # ---------------------------
-# Session state init
+# Session State
 # ---------------------------
 if "input_mode" not in st.session_state:
     st.session_state.input_mode = "Paste URL"
@@ -337,177 +560,164 @@ if "submitted" not in st.session_state:
     st.session_state.submitted = False
 
 # ---------------------------
-# Input mode + fields
+# Main Interface
 # ---------------------------
-st.session_state.input_mode = st.radio("Choose input method:", ["Paste URL", "Paste Text"], horizontal=True)
+if not available_providers:
+    st.error("❌ **No AI providers configured**")
+    st.info("Please add at least one API key in Streamlit Settings → Secrets")
+    st.stop()
 
+# Input method selection
+st.session_state.input_mode = st.radio(
+    "Choose input method:", 
+    ["Paste URL", "Paste Text"], 
+    horizontal=True
+)
+
+# URL input
 if st.session_state.input_mode == "Paste URL":
-    url_col, info_col = st.columns([15, 1])
-    with url_col:
-        url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
-    with info_col:
-        # Simplified info icon without complex JavaScript
-        st.markdown("ℹ️", help="Paste URL → press Preview Page Text\n(See sidebar for details)")
-
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        if st.button("Preview Page Text", type="primary"):
+    url = st.text_input("Enter webpage URL:", value=st.session_state.get("url", ""))
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("📄 Extract Text", type="primary"):
             if not url:
                 st.warning("Please enter a URL.")
             else:
-                st.session_state.url = url
                 with st.spinner("Extracting text from webpage..."):
                     text, error = extract_text_from_url(url)
                 
                 if error:
                     st.error(error)
-                    st.session_state.page_text = ""
                 else:
                     st.session_state.page_text = text
-                    st.success("Page text extracted successfully!")
-                    
-    with c2:
-        if st.button("Clear Inputs"):
-            clear_all_state()
+                    st.session_state.url = url
+                    st.success("✅ Text extracted successfully!")
+    
+    with col2:
+        if st.button("🗑️ Clear"):
+            for key in ["page_text", "url", "quiz", "answers", "submitted"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
 
     if st.session_state.page_text:
-        with st.expander("Preview extracted text", expanded=False):
-            st.text_area("Extracted content:", st.session_state.page_text, height=200, disabled=True)
+        with st.expander("📖 Preview extracted text"):
+            st.text_area("Content:", st.session_state.page_text, height=200, disabled=True)
 
+# Text input
 else:
     st.session_state.page_text = st.text_area(
-        "Paste Trailhead page content here:",
+        "Paste content here:",
         value=st.session_state.get("page_text", ""),
         height=240,
-        help="Copy and paste the content from the Trailhead page here"
+        help="Copy and paste content from any source"
     )
-    if st.button("Clear Inputs"):
-        clear_all_state()
+    
+    if st.button("🗑️ Clear"):
+        for key in ["page_text", "quiz", "answers", "submitted"]:
+            if key in st.session_state:
+                del st.session_state[key]
+        st.rerun()
 
-# ---------------------------
 # Generate quiz
-# ---------------------------
-if st.button("Generate Quiz", type="primary", disabled=not API_KEY):
-    if not API_KEY:
-        st.error("Gemini API key is required to generate quizzes.")
-    elif not st.session_state.page_text:
+st.markdown("---")
+if st.button("🎯 Generate Quiz", type="primary", disabled=not st.session_state.page_text):
+    if not st.session_state.page_text:
         st.warning("Please provide content first.")
     else:
-        result = generate_quiz(st.session_state.page_text)
+        result = generate_quiz(st.session_state.page_text, selected_provider, providers)
         if result:
             st.session_state.quiz = result
             st.session_state.answers = {}
             st.session_state.submitted = False
-            st.success(f"Generated {len(result.get('original', []))} questions!")
             st.rerun()
 
-# ---------------------------
-# Quiz UI
-# ---------------------------
+# Quiz display
 if st.session_state.quiz and "shuffled" in st.session_state.quiz:
-    st.write("### 📝 Quiz")
+    st.markdown("---")
+    st.write("### 📝 Quiz Time!")
+    
     shuffled = st.session_state.quiz["shuffled"]
-
-    if not shuffled:
-        st.error("No valid questions in the quiz. Please try generating again.")
-    else:
-        for i, q in enumerate(shuffled):
-            st.write(f"**Q{i+1}: {q['question']}**")
-            
-            # Check if question has enough options
-            if len(q.get('options', [])) < 2:
-                st.error(f"Question {i+1} has insufficient options. Skipping...")
-                continue
+    
+    for i, q in enumerate(shuffled):
+        st.write(f"**Q{i+1}: {q['question']}**")
+        selected = st.radio(
+            f"Select answer for Q{i+1}:",
+            q["options"],
+            key=f"q{i}",
+            index=None
+        )
+        st.session_state.answers[i] = selected
+    
+    # Control buttons
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        if st.button("✅ Submit Answers", type="primary"):
+            unanswered = [i+1 for i in range(len(shuffled)) if not st.session_state.answers.get(i)]
+            if unanswered:
+                st.warning(f"Please answer: Q{', Q'.join(map(str, unanswered))}")
+            else:
+                st.session_state.submitted = True
+                st.rerun()
+    
+    with col2:
+        if st.button("🔄 Retake Quiz"):
+            # Reshuffle and clear answers
+            st.session_state.quiz["shuffled"] = shuffle_quiz(st.session_state.quiz["original"])
+            for i in range(20):
+                if f"q{i}" in st.session_state:
+                    del st.session_state[f"q{i}"]
+            st.session_state.answers = {}
+            st.session_state.submitted = False
+            st.rerun()
+    
+    with col3:
+        if st.button("🎲 New Quiz"):
+            if st.session_state.page_text:
+                # Clear old data
+                for i in range(20):
+                    if f"q{i}" in st.session_state:
+                        del st.session_state[f"q{i}"]
                 
-            selected_option = st.radio(
-                f"Select answer for Q{i+1}",
-                q["options"],
-                key=f"q{i}",
-                index=None,
-            )
-            st.session_state.answers[i] = selected_option
-
-        st.write("---")
-        c1, c2, c3 = st.columns(3)
-        
-        with c1:
-            if st.button("Submit Answers", type="primary"):
-                # Check if all questions are answered
-                unanswered = [i+1 for i in range(len(shuffled)) if st.session_state.answers.get(i) is None]
-                if unanswered:
-                    st.warning(f"Please answer all questions. Missing: Q{', Q'.join(map(str, unanswered))}")
-                else:
-                    st.session_state.submitted = True
+                result = generate_quiz(st.session_state.page_text, selected_provider, providers)
+                if result:
+                    st.session_state.quiz = result
+                    st.session_state.answers = {}
+                    st.session_state.submitted = False
                     st.rerun()
 
-        with c2:
-            if st.button("Retake Quiz"):
-                if st.session_state.quiz and "original" in st.session_state.quiz:
-                    st.session_state.quiz["shuffled"] = _build_shuffled_quiz(st.session_state.quiz["original"])
-                # Clear radio widget keys
-                for i in range(len(st.session_state.quiz.get("shuffled", []))):
-                    key = f"q{i}"
-                    if key in st.session_state:
-                        try:
-                            del st.session_state[key]
-                        except Exception:
-                            pass
-                st.session_state.answers = {}
-                st.session_state.submitted = False
-                st.rerun()
-
-        with c3:
-            if st.button("Generate New Quiz"):
-                if st.session_state.page_text:
-                    # Clear old radio keys
-                    for i in range(50):
-                        key = f"q{i}"
-                        if key in st.session_state:
-                            try:
-                                del st.session_state[key]
-                            except Exception:
-                                pass
-                    
-                    result = generate_quiz(st.session_state.page_text)
-                    if result:
-                        st.session_state.quiz = result
-                        st.session_state.answers = {}
-                        st.session_state.submitted = False
-                        st.rerun()
-                else:
-                    st.warning("No source content to regenerate from.")
-
-# ---------------------------
-# Review mode
-# ---------------------------
-if st.session_state.submitted and st.session_state.quiz and "shuffled" in st.session_state.quiz:
-    st.write("### 🔍 Review Mode")
+# Results display
+if st.session_state.submitted and st.session_state.quiz:
+    st.markdown("---")
+    st.write("### 🎯 Quiz Results")
+    
     score = 0
     shuffled = st.session_state.quiz["shuffled"]
     
     for i, q in enumerate(shuffled):
         selected = st.session_state.answers.get(i)
         correct_letter = q.get("correct")
-        correct_option = next((opt for opt in q["options"] if opt.startswith(f"{correct_letter}.")), None) if correct_letter else None
+        correct_option = next((opt for opt in q["options"] if opt.startswith(f"{correct_letter}.")), None)
         
         st.write(f"**Q{i+1}: {q['question']}**")
         
         if selected == correct_option:
-            st.success(f"✅ **Correct!** Your answer: {selected}")
+            st.success(f"✅ **Correct!** {selected}")
             score += 1
         else:
-            st.error(f"❌ **Incorrect.** Your answer: {selected or 'No answer'}")
+            st.error(f"❌ **Wrong.** You chose: {selected or 'No answer'}")
             if correct_option:
                 st.info(f"✔️ **Correct answer:** {correct_option}")
         
-        if q.get('explanation'):
+        if q.get("explanation"):
             st.info(f"💡 **Explanation:** {q['explanation']}")
-        
         st.write("---")
     
-    # Final score with better formatting
+    # Final score
     percentage = (score / len(shuffled)) * 100 if shuffled else 0
-    st.write(f"## 🎯 Final Score: {score}/{len(shuffled)} ({percentage:.1f}%)")
+    st.write(f"## 🏆 Final Score: {score}/{len(shuffled)} ({percentage:.1f}%)")
     
     if percentage >= 80:
         st.balloons()
@@ -516,3 +726,6 @@ if st.session_state.submitted and st.session_state.quiz and "shuffled" in st.ses
         st.success("👍 Good job!")
     else:
         st.info("📚 Keep studying and try again!")
+    
+    # Provider credit
+    st.info(f"Quiz generated by: **{selected_provider}**")
