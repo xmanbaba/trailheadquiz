@@ -524,8 +524,31 @@ def generate_quiz(content: str, provider: str, providers: dict):
             return []
     
     if error:
+        # Enhanced error display for Kimi
+        if provider == "Kimi (Moonshot)" and ("401" in error or "403" in error):
+            st.error("❌ **Kimi Authentication Issue**")
+            st.info("""
+            **Common Kimi Issues:**
+            
+            **401 Unauthorized:**
+            - Invalid API key format
+            - API key not properly configured
+            - Account not activated
+            
+            **403 Forbidden:**
+            - Account needs phone verification
+            - Geographic restrictions
+            - Usage limits exceeded
+            
+            **Solutions:**
+            1. 📱 Complete phone verification at https://platform.moonshot.cn/
+            2. 🔑 Regenerate API key in console
+            3. ✅ Ensure account is fully activated
+            4. 🌍 Check if service is available in your region
+            """)
+            
         # Enhanced error display for Gemini
-        if provider == "Gemini" and ("quota" in error.lower() or "exceeded" in error.lower()):
+        elif provider == "Gemini" and ("quota" in error.lower() or "exceeded" in error.lower()):
             st.error("❌ **Gemini Quota Exceeded**")
             st.info("""
             **Free Tier Limits Reached:**
@@ -545,12 +568,12 @@ def generate_quiz(content: str, provider: str, providers: dict):
         else:
             st.error(f"❌ {error}")
         
-        # Suggest alternatives for any quota error
-        if "quota" in error.lower() or "exceeded" in error.lower() or "limit" in error.lower():
+        # Suggest alternatives for any quota/auth error
+        if any(word in error.lower() for word in ["quota", "exceeded", "limit", "401", "403", "unauthorized", "forbidden"]):
             other_providers = [p for p in providers.keys() if p != provider and providers[p]["key"]]
             if other_providers:
                 st.success(f"💡 **Try switching to**: {', '.join(other_providers)}")
-                st.info("These providers have higher free tier limits!")
+                st.info("These providers might have different limits or better availability!")
         return []
     
     if not raw_quiz:
