@@ -5,23 +5,32 @@ import requests
 from bs4 import BeautifulSoup
 import streamlit as st
 import google.generativeai as genai
+import time
 
 # ---------------------------
 # Page config
 # ---------------------------
-st.set_page_config(page_title="Trailhead Quiz Generator", layout="centered")
+st.set_page_config(
+    page_title="Trailhead Quiz Generator", 
+    layout="centered",
+    initial_sidebar_state="expanded"
+)
 
 # ---------------------------
-# API key (Streamlit Cloud: Settings → Secrets → gemini_api_key)
+# API key with better error handling
 # ---------------------------
 API_KEY = st.secrets.get("gemini_api_key", os.getenv("GEMINI_API_KEY"))
 if API_KEY:
-    genai.configure(api_key=API_KEY)
+    try:
+        genai.configure(api_key=API_KEY)
+    except Exception as e:
+        st.error(f"Failed to configure Gemini API: {e}")
+        API_KEY = None
 
 # ---------------------------
 # Header + short description
 # ---------------------------
-st.title("Trailhead Quiz Generator 📝")   # FIX: Removed "Gemini Edition"
+st.title("Trailhead Quiz Generator 📝")
 st.write(
     "Paste a **Trailhead URL** or **content text**, then generate a quick quiz to check your understanding.\n\n"
     "**How it works:**\n"
@@ -37,37 +46,79 @@ with st.sidebar:
         "3. Click **Generate Quiz**.\n"
         "4. Answer each question.\n"
         "5. Click **Submit Answers** to see your score.\n"
-        "6. Use **Retake Quiz** to try again (questions + options reshuffled).  # FIX: Clarified behavior\n"
+        "6. Use **Retake Quiz** to try again (questions + options reshuffled).\n"
         "7. Use **Generate New Quiz** for a different set."
     )
     st.markdown("---")
     st.markdown("**Tip:** Some pages block scraping. If URL fails, copy & paste the content instead.")
+    
+    # API status indicator
+    if API_KEY:
+        st.success("✅ Gemini API configured")
+    else:
+        st.error("❌ Gemini API key missing")
+        st.info("Add `gemini_api_key` in Streamlit Settings → Secrets")
 
 # ---------------------------
-# Utilities
+# Utilities with better error handling
 # ---------------------------
-def extract_text_from_url(url: str) -> str:
-    """Best-effort extraction of readable text from a webpage."""
+def extract_text_from_url(url: str) -> tuple[str, str]:
+    """
+    Extract readable text from a webpage.
+    Returns: (text_content, error_message)
+    """
     try:
+        # Validate URL format
+        if not url.startswith(('http://', 'https://')):
+            return "", "Please enter a valid URL starting with http:// or https://"
+        
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/122.0.0.0 Safari/537.36"
+                          "Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
         }
-        resp = requests.get(url, headers=headers, timeout=25)
+        
+        resp = requests.get(url, headers=headers, timeout=30, allow_redirects=True)
+        
+        if resp.status_code == 403:
+            return "", "Access forbidden (403). The website may be blocking automated requests. Try copying the content manually."
+        elif resp.status_code == 404:
+            return "", "Page not found (404). Please check the URL."
+        elif resp.status_code != 200:
+            return "", f"HTTP {resp.status_code} error. The website may be temporarily unavailable."
+            
         resp.raise_for_status()
         soup = BeautifulSoup(resp.text, "html.parser")
 
+        # Remove script and style elements
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
+
         chunks = []
-        for tag in soup.find_all(["h1", "h2", "h3", "p", "li"]):
+        for tag in soup.find_all(["h1", "h2", "h3", "h4", "p", "li", "div"], recursive=True):
             text = tag.get_text(separator=" ", strip=True)
-            if text:
+            if text and len(text) > 10:  # Filter out very short text
                 chunks.append(text)
+        
         text = "\n".join(chunks).strip()
-        return text[:15000]  # limit length
+        
+        if not text:
+            return "", "No readable content found on this page. Try copying the content manually."
+            
+        return text[:15000], ""  # limit length, no error
+        
+    except requests.exceptions.Timeout:
+        return "", "Request timed out. The website may be slow or unresponsive."
+    except requests.exceptions.ConnectionError:
+        return "", "Connection error. Please check your internet connection and the URL."
+    except requests.exceptions.RequestException as e:
+        return "", f"Network error: {str(e)}"
     except Exception as e:
-        st.error(f"Couldn't fetch the page: {e}")
-        return ""
+        return "", f"Unexpected error: {str(e)}"
 
 def parse_quiz_from_text(raw_quiz: str):
     """
@@ -110,7 +161,7 @@ def parse_quiz_from_text(raw_quiz: str):
         if explanation_line and ":" in explanation_line:
             explanation = explanation_line.split(":", 1)[1].strip()
 
-        if question_text and options and correct_letter in {"A", "B", "C", "D"}:
+        if question_text and len(options) >= 3 and correct_letter in {"A", "B", "C", "D"}:
             quiz.append(
                 {
                     "question": question_text,
@@ -123,10 +174,13 @@ def parse_quiz_from_text(raw_quiz: str):
     return quiz
 
 def _build_shuffled_quiz(original_quiz):
-    """Shuffle both questions and options but keep labels A–D consistent.  # FIX"""
+    """Shuffle both questions and options but keep labels A–D consistent."""
+    if not original_quiz:
+        return []
+        
     # Shuffle question order
-    shuffled_questions = original_quiz[:]  # copy
-    random.shuffle(shuffled_questions)     # FIX: shuffle question order
+    shuffled_questions = original_quiz[:]
+    random.shuffle(shuffled_questions)
 
     shuffled = []
     for q in shuffled_questions:
@@ -167,9 +221,13 @@ def _build_shuffled_quiz(original_quiz):
     return shuffled
 
 def generate_quiz(content: str):
-    """Ask Gemini to produce 5 MCQs in strict format."""
+    """Ask Gemini to produce 5 MCQs in strict format with retry logic."""
     if not API_KEY:
         st.error("No Gemini API key found. Add it in Streamlit **Settings → Secrets** as `gemini_api_key`.")
+        return []
+
+    if not content or len(content.strip()) < 50:
+        st.error("Content is too short to generate a meaningful quiz. Please provide more content.")
         return []
 
     prompt = f"""
@@ -184,39 +242,84 @@ Format each question EXACTLY like this:
    Correct Answer: X
    Explanation: one short sentence
 
-Only produce the quiz in the format above. No extra commentary.
+Make sure questions test understanding of key concepts. Only produce the quiz in the format above. No extra commentary.
 
 Content:
-{content}
+{content[:10000]}
 """
 
-    try:
-        model = genai.GenerativeModel("gemini-1.5-flash")
-        with st.spinner("Generating quiz..."):
-            result = model.generate_content(prompt)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            model = genai.GenerativeModel("gemini-1.5-flash")
+            with st.spinner(f"Generating quiz... (attempt {attempt + 1}/{max_retries})"):
+                result = model.generate_content(
+                    prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.7,
+                        top_p=0.8,
+                        top_k=40,
+                        max_output_tokens=2048,
+                    )
+                )
 
-        raw = (result.text or "").strip()
-        if not raw:
-            st.error("Gemini returned an empty response. Try again or paste text instead of URL.")
-            return []
+            raw = (result.text or "").strip()
+            if not raw:
+                if attempt < max_retries - 1:
+                    st.warning(f"Empty response on attempt {attempt + 1}. Retrying...")
+                    time.sleep(1)
+                    continue
+                else:
+                    st.error("Gemini returned empty responses. Please try again later.")
+                    return []
 
-        quiz = parse_quiz_from_text(raw)
-        if not quiz:
-            st.error("Could not parse the quiz output. Try again.")
-            return []
+            quiz = parse_quiz_from_text(raw)
+            if not quiz:
+                if attempt < max_retries - 1:
+                    st.warning(f"Could not parse quiz on attempt {attempt + 1}. Retrying...")
+                    time.sleep(1)
+                    continue
+                else:
+                    st.error("Could not parse quiz output after multiple attempts. Please try again.")
+                    return []
 
-        return {"original": quiz, "shuffled": _build_shuffled_quiz(quiz)}
-    except Exception as e:
-        st.error(f"Quiz generation error: {e}")
-        return []
+            if len(quiz) < 3:
+                if attempt < max_retries - 1:
+                    st.warning(f"Only {len(quiz)} questions generated on attempt {attempt + 1}. Retrying...")
+                    time.sleep(1)
+                    continue
+                else:
+                    st.warning(f"Only generated {len(quiz)} questions. Proceeding anyway.")
+
+            return {"original": quiz, "shuffled": _build_shuffled_quiz(quiz)}
+            
+        except Exception as e:
+            error_msg = str(e)
+            if "403" in error_msg or "forbidden" in error_msg.lower():
+                st.error("API access forbidden. Please check your API key and quota.")
+                return []
+            elif "quota" in error_msg.lower() or "limit" in error_msg.lower():
+                st.error("API quota exceeded. Please try again later.")
+                return []
+            elif attempt < max_retries - 1:
+                st.warning(f"Error on attempt {attempt + 1}: {error_msg}. Retrying...")
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+            else:
+                st.error(f"Quiz generation failed after {max_retries} attempts: {error_msg}")
+                return []
+
+    return []
 
 def clear_all_state():
     """Reset session state fully."""
+    keys_to_keep = {'input_mode'}  # Keep input mode selection
     for k in list(st.session_state.keys()):
-        try:
-            del st.session_state[k]
-        except Exception:
-            pass
+        if k not in keys_to_keep:
+            try:
+                del st.session_state[k]
+            except Exception:
+                pass
     st.rerun()
 
 # ---------------------------
@@ -243,124 +346,40 @@ if st.session_state.input_mode == "Paste URL":
     with url_col:
         url = st.text_input("Enter Trailhead page URL:", value=st.session_state.get("url", ""))
     with info_col:
-        # FIX: Small grey info icon with JS/CSS tooltip that toggles on tap and auto-closes after 7s
-        st.markdown(
-            """
-            <style>
-            /* tooltip container */
-            .tt-container { position: relative; display:inline-block; }
-            .tt-icon { color: grey; font-size:16px; cursor: pointer; user-select: none; }
-            /* tooltip box */
-            .tt-box {
-              visibility: hidden;
-              opacity: 0;
-              width: 200px;
-              background-color: #f9f9f9;
-              color: #222;
-              text-align: left;
-              border-radius: 6px;
-              padding: 8px;
-              position: absolute;
-              z-index: 9999;
-              bottom: 140%;
-              left: 50%;
-              transform: translateX(-50%);
-              box-shadow: 0px 2px 8px rgba(0,0,0,0.12);
-              font-size: 12px;
-              transition: opacity 0.18s ease-in-out;
-            }
-            /* caret */
-            .tt-box::after {
-              content: "";
-              position: absolute;
-              top: 100%;
-              left: 50%;
-              margin-left: -6px;
-              border-width: 6px;
-              border-style: solid;
-              border-color: #f9f9f9 transparent transparent transparent;
-            }
-            /* visible state */
-            .tt-visible { visibility: visible !important; opacity: 1 !important; }
-            </style>
-            <div class="tt-container">
-              <span id="ttIcon" class="tt-icon">ℹ️</span>
-              <div id="ttBox" class="tt-box">
-                Paste URL → press Preview Page Text<br>
-                (See sidebar for details)
-              </div>
-            </div>
-
-            <script>
-            (function() {
-              const icon = document.getElementById("ttIcon");
-              const box = document.getElementById("ttBox");
-              let hideTimer = null;
-              // show on hover (desktop)
-              icon.addEventListener("mouseenter", function(){ 
-                box.classList.add("tt-visible");
-                if (hideTimer) { clearTimeout(hideTimer); hideTimer = null;}
-              });
-              icon.addEventListener("mouseleave", function(){ 
-                // on desktop hide on mouseleave with small delay
-                hideTimer = setTimeout(()=>{ box.classList.remove("tt-visible"); hideTimer = null; }, 350);
-              });
-              // toggle on click/tap (mobile)
-              icon.addEventListener("click", function(e){
-                e.preventDefault();
-                if (box.classList.contains("tt-visible")) {
-                  box.classList.remove("tt-visible");
-                  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-                } else {
-                  box.classList.add("tt-visible");
-                  if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-                  // auto-hide after 7 seconds (7000 ms)
-                  hideTimer = setTimeout(function(){
-                    box.classList.remove("tt-visible");
-                    hideTimer = null;
-                  }, 7000);
-                }
-              });
-              // also hide if user clicks anywhere else
-              document.addEventListener("click", function(ev){
-                if (!icon.contains(ev.target) && !box.contains(ev.target)) {
-                  if (box.classList.contains("tt-visible")) {
-                    box.classList.remove("tt-visible");
-                    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
-                  }
-                }
-              });
-            })();
-            </script>
-            """,
-            unsafe_allow_html=True,
-        )
+        # Simplified info icon without complex JavaScript
+        st.markdown("ℹ️", help="Paste URL → press Preview Page Text\n(See sidebar for details)")
 
     c1, c2 = st.columns([1, 1])
     with c1:
-        if st.button("Preview Page Text"):
+        if st.button("Preview Page Text", type="primary"):
             if not url:
                 st.warning("Please enter a URL.")
             else:
                 st.session_state.url = url
-                st.session_state.page_text = extract_text_from_url(url)
-                if st.session_state.page_text:
-                    st.success("Page text extracted. Scroll to preview below.")
+                with st.spinner("Extracting text from webpage..."):
+                    text, error = extract_text_from_url(url)
+                
+                if error:
+                    st.error(error)
+                    st.session_state.page_text = ""
                 else:
-                    st.warning("No text extracted. Try copying manually.")
+                    st.session_state.page_text = text
+                    st.success("Page text extracted successfully!")
+                    
     with c2:
         if st.button("Clear Inputs"):
             clear_all_state()
 
     if st.session_state.page_text:
-        with st.expander("Preview extracted text"):
-            st.write(st.session_state.page_text)
+        with st.expander("Preview extracted text", expanded=False):
+            st.text_area("Extracted content:", st.session_state.page_text, height=200, disabled=True)
 
 else:
     st.session_state.page_text = st.text_area(
         "Paste Trailhead page content here:",
         value=st.session_state.get("page_text", ""),
         height=240,
+        help="Copy and paste the content from the Trailhead page here"
     )
     if st.button("Clear Inputs"):
         clear_all_state()
@@ -368,72 +387,95 @@ else:
 # ---------------------------
 # Generate quiz
 # ---------------------------
-if st.button("Generate Quiz"):
-    if not st.session_state.page_text:
+if st.button("Generate Quiz", type="primary", disabled=not API_KEY):
+    if not API_KEY:
+        st.error("Gemini API key is required to generate quizzes.")
+    elif not st.session_state.page_text:
         st.warning("Please provide content first.")
     else:
         result = generate_quiz(st.session_state.page_text)
-        st.session_state.quiz = result
-        st.session_state.answers = {}
-        st.session_state.submitted = False
-        st.rerun()
+        if result:
+            st.session_state.quiz = result
+            st.session_state.answers = {}
+            st.session_state.submitted = False
+            st.success(f"Generated {len(result.get('original', []))} questions!")
+            st.rerun()
 
 # ---------------------------
 # Quiz UI
 # ---------------------------
 if st.session_state.quiz and "shuffled" in st.session_state.quiz:
-    st.write("### Quiz")
+    st.write("### 📝 Quiz")
     shuffled = st.session_state.quiz["shuffled"]
 
-    for i, q in enumerate(shuffled):
-        st.write(f"**Q{i+1}: {q['question']}**")
-        st.session_state.answers[i] = st.radio(
-            f"Select answer for Q{i+1}",
-            q["options"],
-            key=f"q{i}",
-            index=None,  # FIX: Start with no preselected answer
-        )
+    if not shuffled:
+        st.error("No valid questions in the quiz. Please try generating again.")
+    else:
+        for i, q in enumerate(shuffled):
+            st.write(f"**Q{i+1}: {q['question']}**")
+            
+            # Check if question has enough options
+            if len(q.get('options', [])) < 2:
+                st.error(f"Question {i+1} has insufficient options. Skipping...")
+                continue
+                
+            selected_option = st.radio(
+                f"Select answer for Q{i+1}",
+                q["options"],
+                key=f"q{i}",
+                index=None,
+            )
+            st.session_state.answers[i] = selected_option
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        if st.button("Submit Answers"):
-            st.session_state.submitted = True
-            st.rerun()
+        st.write("---")
+        c1, c2, c3 = st.columns(3)
+        
+        with c1:
+            if st.button("Submit Answers", type="primary"):
+                # Check if all questions are answered
+                unanswered = [i+1 for i in range(len(shuffled)) if st.session_state.answers.get(i) is None]
+                if unanswered:
+                    st.warning(f"Please answer all questions. Missing: Q{', Q'.join(map(str, unanswered))}")
+                else:
+                    st.session_state.submitted = True
+                    st.rerun()
 
-    with c2:
-        if st.button("Retake Quiz"):
-            # FIX: On retake, shuffle both questions and options (via _build_shuffled_quiz)
-            if st.session_state.quiz and "original" in st.session_state.quiz:
-                st.session_state.quiz["shuffled"] = _build_shuffled_quiz(st.session_state.quiz["original"])
-            # Remove radio widget keys so they rebuild with no preselection
-            for i in range(len(st.session_state.quiz.get("shuffled", []))):
-                key = f"q{i}"
-                if key in st.session_state:
-                    try:
-                        del st.session_state[key]
-                    except Exception:
-                        pass
-            st.session_state.answers = {}
-            st.session_state.submitted = False
-            st.rerun()
-
-    with c3:
-        if st.button("Generate New Quiz"):
-            if st.session_state.page_text:
-                result = generate_quiz(st.session_state.page_text)
-                st.session_state.quiz = result
-                st.session_state.answers = {}
-                st.session_state.submitted = False
-                for i in range(50):
+        with c2:
+            if st.button("Retake Quiz"):
+                if st.session_state.quiz and "original" in st.session_state.quiz:
+                    st.session_state.quiz["shuffled"] = _build_shuffled_quiz(st.session_state.quiz["original"])
+                # Clear radio widget keys
+                for i in range(len(st.session_state.quiz.get("shuffled", []))):
                     key = f"q{i}"
                     if key in st.session_state:
                         try:
                             del st.session_state[key]
                         except Exception:
                             pass
+                st.session_state.answers = {}
+                st.session_state.submitted = False
                 st.rerun()
-            else:
-                st.warning("No source content to regenerate from.")
+
+        with c3:
+            if st.button("Generate New Quiz"):
+                if st.session_state.page_text:
+                    # Clear old radio keys
+                    for i in range(50):
+                        key = f"q{i}"
+                        if key in st.session_state:
+                            try:
+                                del st.session_state[key]
+                            except Exception:
+                                pass
+                    
+                    result = generate_quiz(st.session_state.page_text)
+                    if result:
+                        st.session_state.quiz = result
+                        st.session_state.answers = {}
+                        st.session_state.submitted = False
+                        st.rerun()
+                else:
+                    st.warning("No source content to regenerate from.")
 
 # ---------------------------
 # Review mode
@@ -442,14 +484,35 @@ if st.session_state.submitted and st.session_state.quiz and "shuffled" in st.ses
     st.write("### 🔍 Review Mode")
     score = 0
     shuffled = st.session_state.quiz["shuffled"]
+    
     for i, q in enumerate(shuffled):
         selected = st.session_state.answers.get(i)
         correct_letter = q.get("correct")
         correct_option = next((opt for opt in q["options"] if opt.startswith(f"{correct_letter}.")), None) if correct_letter else None
+        
+        st.write(f"**Q{i+1}: {q['question']}**")
+        
         if selected == correct_option:
-            st.success(f"✅ Q{i+1}: Correct")
+            st.success(f"✅ **Correct!** Your answer: {selected}")
             score += 1
         else:
-            st.error(f"❌ Q{i+1}: Wrong. Correct answer: {correct_option}")
-        st.info(f"**Explanation:** {q.get('explanation', 'No explanation provided.')}")
-    st.write(f"## 🎯 Your Score: {score}/{len(shuffled)}")
+            st.error(f"❌ **Incorrect.** Your answer: {selected or 'No answer'}")
+            if correct_option:
+                st.info(f"✔️ **Correct answer:** {correct_option}")
+        
+        if q.get('explanation'):
+            st.info(f"💡 **Explanation:** {q['explanation']}")
+        
+        st.write("---")
+    
+    # Final score with better formatting
+    percentage = (score / len(shuffled)) * 100 if shuffled else 0
+    st.write(f"## 🎯 Final Score: {score}/{len(shuffled)} ({percentage:.1f}%)")
+    
+    if percentage >= 80:
+        st.balloons()
+        st.success("🎉 Excellent work!")
+    elif percentage >= 60:
+        st.success("👍 Good job!")
+    else:
+        st.info("📚 Keep studying and try again!")
