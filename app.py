@@ -73,12 +73,12 @@ def configure_ai_providers():
 # ---------------------------
 st.title("Multi-AI Quiz Generator 🤖")
 st.write(
-    "Generate quizzes using multiple AI providers. Automatically switches to available providers when quota limits are reached.\n\n"
+    "Generate quizzes using multiple AI providers. **Gemini is the recommended provider** for reliability.\n\n"
     "**Supported AI Providers:**\n"
-    "- 🔥 **Gemini**: 50-100 requests/day (free)\n"
-    "- 🌙 **Kimi (Moonshot)**: Higher free limits\n"
-    "- 🤖 **OpenAI**: Paid (more reliable)\n\n"
-    "⚠️ **Note**: Each quiz generates **5 questions**. Free tier users should monitor usage to avoid quota limits."
+    "- 🔥 **Gemini**: ✅ Reliable, tested, generates 5 questions consistently\n"
+    "- 🌙 **Kimi (Moonshot)**: ⚠️ Experimental, may have authentication issues\n"
+    "- 🤖 **OpenAI**: 💳 Paid service (most reliable if you have credits)\n\n"
+    "⭐ **Recommendation**: Use **Gemini** for best results. Each quiz generates **5 questions**."
 )
 
 # ---------------------------
@@ -122,33 +122,74 @@ with st.sidebar:
     else:
         st.success(f"✅ {len(available_providers)} provider(s) ready")
         
-        # Provider selection with Gemini preference and warning
+    # Provider selection with Gemini as preferred default
+    if "Gemini" in available_providers:
+        default_provider = "Gemini"
+    else:
+        default_provider = available_providers[0] if available_providers else None
+    
+    if default_provider:
         selected_provider = st.selectbox(
             "Choose AI Provider:",
             available_providers,
-            help="Gemini: Limited free tier but reliable. Alternatives: Higher free limits."
+            index=available_providers.index(default_provider),
+            help="Gemini: Reliable and tested. Kimi: Experimental - may have authentication issues."
         )
         
-        # Special guidance for Gemini users
+        # Provider-specific guidance
         if selected_provider == "Gemini":
+            st.success("✅ **Gemini Selected** - Reliable and well-tested!")
             st.info("""
-            🔥 **Gemini Tips:**
-            - 50-100 requests/day (free tier)
-            - Resets at midnight PT
-            - For more usage: Enable billing for 1000+ requests/day
+            🔥 **Gemini Benefits:**
+            - ✅ Proven reliability
+            - ✅ Consistent 5-question generation
+            - ⚠️ Limited free tier (50-100/day)
+            - 🔄 Resets at midnight PT
             """)
             
-            # Show upgrade path
-            st.markdown("""
-            💡 **Need more requests?** 
-            
-            [📈 Upgrade to Paid Tier](https://aistudio.google.com/apikey) for:
-            - 1,000+ requests/day
-            - Higher rate limits
-            - Priority access
+            # Show upgrade path for Gemini users
+            with st.expander("💡 Need more Gemini requests?"):
+                st.markdown("""
+                **Upgrade Options:**
+                
+                [📈 Enable Billing](https://aistudio.google.com/apikey) for:
+                - 1,000+ requests/day
+                - Higher rate limits
+                - Priority access
+                
+                **Or create fresh API key:**
+                1. Visit link above
+                2. "Create API key in NEW project"
+                3. Fresh 50-100 requests/day quota
+                """)
+        
+        elif selected_provider == "Kimi (Moonshot)":
+            st.warning("⚠️ **Kimi Selected** - Experimental provider")
+            st.info("""
+            🌙 **Kimi Status:**
+            - ⚠️ Authentication issues reported
+            - 🔧 Troubleshooting in progress
+            - 💡 **Recommendation**: Use Gemini for reliability
             """)
+            
+            # Kimi troubleshooting section
+            with st.expander("🔧 Kimi Troubleshooting"):
+                st.markdown("""
+                **Common Issues:**
+                - Account verification incomplete
+                - API key format incorrect
+                - Regional restrictions
+                
+                **Debug Steps:**
+                1. Verify account at https://platform.moonshot.cn/
+                2. Complete phone verification
+                3. Regenerate API key
+                4. Ensure key starts with 'sk-'
+                
+                **If issues persist, switch to Gemini above ⬆️**
+                """)
         else:
-            st.success(f"✅ Using {selected_provider} - Better free tier limits!")
+            st.info(f"Using {selected_provider}")
     
     st.markdown("---")
     
@@ -193,14 +234,16 @@ with st.sidebar:
         
         **Kimi (Moonshot)** - High free limits:
         1. Visit: https://platform.moonshot.cn/
-        2. Sign up with phone number
-        3. Verify account & get API key
-        4. Much higher daily limits than Gemini
+        2. Sign up with phone number (required)
+        3. Complete identity verification
+        4. Generate API key in console
+        5. Much higher daily limits than Gemini
         
-        **Troubleshooting:**
-        - Kimi 401 error: Check API key format
-        - Kimi 403 error: Account needs verification
-        - Gemini <5 questions: Try regenerating
+        **Troubleshooting Kimi:**
+        - 401 error: Invalid API key format
+        - 403 error: Account needs phone verification
+        - Check API key starts with 'sk-'
+        - Ensure account is fully activated
         """)
     
     # Current provider info
@@ -379,20 +422,37 @@ def generate_with_gemini(content: str):
     """Generate quiz using Gemini with enhanced error handling"""
     try:
         model = genai.GenerativeModel("gemini-1.5-flash")
-        prompt = f"""Create exactly 5 multiple-choice questions from this content:
+        prompt = f"""You are a quiz generator. Create EXACTLY 5 multiple-choice questions from this content.
 
+STRICT REQUIREMENTS:
+- Generate EXACTLY 5 questions, no more, no less
+- Each question must have 4 options (A, B, C, D)
+- Specify the correct answer
+- Provide brief explanation
+
+Content:
 {content[:4000]}
 
-Format:
-1. Question
-   A. option
-   B. option  
-   C. option
-   D. option
-   Correct Answer: X
-   Explanation: brief explanation
+Format EXACTLY like this:
+1. Question text here
+   A. First option
+   B. Second option
+   C. Third option
+   D. Fourth option
+   Correct Answer: A
+   Explanation: Brief explanation here
 
-Only return the quiz, no extra text."""
+2. Question text here
+   A. First option
+   B. Second option
+   C. Third option
+   D. Fourth option
+   Correct Answer: B
+   Explanation: Brief explanation here
+
+[Continue for questions 3, 4, and 5]
+
+IMPORTANT: Return ONLY the 5 questions in the exact format above. No introduction, no conclusion, no extra text."""
 
         result = model.generate_content(
             prompt,
@@ -400,7 +460,7 @@ Only return the quiz, no extra text."""
                 temperature=0.7,
                 top_p=0.8,
                 top_k=40,
-                max_output_tokens=2048,
+                max_output_tokens=3000,  # Increased for 5 questions
             )
         )
         return result.text, None
@@ -426,12 +486,18 @@ Only return the quiz, no extra text."""
             return None, f"Gemini error: {str(e)}"
 
 def generate_with_kimi(content: str, api_key: str):
-    """Generate quiz using Kimi (Moonshot) API"""
+    """Generate quiz using Kimi (Moonshot) API - Enhanced debugging"""
     try:
-        url = "https://api.moonshot.cn/v1/chat/completions"
+        # Try multiple possible endpoints
+        endpoints_to_try = [
+            "https://api.moonshot.cn/v1/chat/completions",
+            "https://api.moonshot.ai/v1/chat/completions"
+        ]
+        
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "Quiz-Generator/1.0"
         }
         
         prompt = f"""Create exactly 5 multiple-choice questions from this content:
@@ -450,21 +516,50 @@ Format each question exactly like this:
 Only return the quiz, no extra text."""
 
         data = {
-            "model": "moonshot-v1-8k",
+            "model": "moonshot-v1-8k", 
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0.7,
-            "max_tokens": 1500
+            "max_tokens": 2000
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=30)
-        if response.status_code == 200:
-            result = response.json()
-            return result["choices"][0]["message"]["content"], None
-        else:
-            return None, f"Kimi API error: {response.status_code}"
+        last_error = None
+        
+        # Try each endpoint
+        for url in endpoints_to_try:
+            try:
+                response = requests.post(url, headers=headers, json=data, timeout=30)
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        return result["choices"][0]["message"]["content"], None
+                else:
+                    last_error = f"HTTP {response.status_code} from {url}: {response.text[:200]}"
+                    continue
+                    
+            except Exception as e:
+                last_error = f"Connection error to {url}: {str(e)}"
+                continue
+        
+        # If all endpoints failed, provide detailed error
+        return None, f"""🔧 **Kimi Connection Failed** 
+
+**Attempted endpoints:**
+- api.moonshot.cn
+- api.moonshot.ai
+
+**Last error:** {last_error}
+
+**Solutions:**
+1. 🔄 Switch to Gemini (recommended)
+2. 🔑 Verify API key at https://platform.moonshot.cn/
+3. 📱 Complete account verification
+4. 🌍 Check regional availability
+
+**Recommendation:** Use Gemini for reliable quiz generation."""
             
     except Exception as e:
-        return None, f"Kimi error: {str(e)}"
+        return None, f"❌ **Kimi Error**: {str(e)}\n\n💡 **Switch to Gemini** for reliable service."
 
 def generate_with_openai(content: str, api_key: str):
     """Generate quiz using OpenAI"""
@@ -524,28 +619,34 @@ def generate_quiz(content: str, provider: str, providers: dict):
             return []
     
     if error:
-        # Enhanced error display for Kimi
-        if provider == "Kimi (Moonshot)" and ("401" in error or "403" in error):
-            st.error("❌ **Kimi Authentication Issue**")
-            st.info("""
-            **Common Kimi Issues:**
+        # Enhanced error display for Kimi with recommendation to switch
+        if provider == "Kimi (Moonshot)":
+            st.error("❌ **Kimi Authentication/Connection Issue**")
+            st.warning("""
+            🔧 **Kimi is experiencing issues**
             
-            **401 Unauthorized:**
-            - Invalid API key format
-            - API key not properly configured
-            - Account not activated
+            **Common problems:**
+            - Authentication failures (401/403)
+            - Connection timeouts
+            - Account verification required
+            - Regional restrictions
             
-            **403 Forbidden:**
-            - Account needs phone verification
-            - Geographic restrictions
-            - Usage limits exceeded
+            **💡 Immediate Solution:** 
+            **Switch to Gemini** (select in sidebar) for reliable quiz generation.
             
-            **Solutions:**
-            1. 📱 Complete phone verification at https://platform.moonshot.cn/
-            2. 🔑 Regenerate API key in console
-            3. ✅ Ensure account is fully activated
-            4. 🌍 Check if service is available in your region
+            Gemini is tested and working consistently.
             """)
+            
+            # Debug information for Kimi
+            with st.expander("🔍 Kimi Debug Information"):
+                st.code(error, language=None)
+                st.info("""
+                **For developers:**
+                - Multiple endpoints attempted
+                - Authentication headers sent
+                - Account verification may be incomplete
+                - Consider using Gemini as primary provider
+                """)
             
         # Enhanced error display for Gemini
         elif provider == "Gemini" and ("quota" in error.lower() or "exceeded" in error.lower()):
@@ -558,22 +659,21 @@ def generate_quiz(content: str, provider: str, providers: dict):
             **Immediate Solutions:**
             1. ⏰ **Wait**: Quotas reset at midnight Pacific time
             2. 🔑 **New Key**: Create API key in new Google Cloud project
-            3. 🌙 **Switch Provider**: Try Kimi (select above)
-            
-            **Long-term Solution:**
-            💳 **Enable Billing**: $1+ spending = 1000+ requests/day
+            3. 💳 **Upgrade**: Enable billing for 1000+ daily requests
             
             [🚀 Upgrade Here](https://aistudio.google.com/apikey)
             """)
         else:
             st.error(f"❌ {error}")
         
-        # Suggest alternatives for any quota/auth error
-        if any(word in error.lower() for word in ["quota", "exceeded", "limit", "401", "403", "unauthorized", "forbidden"]):
+        # Smart provider switching recommendation
+        if provider == "Kimi (Moonshot)" and "Gemini" in providers and providers["Gemini"]["key"]:
+            st.success("💡 **Quick Fix**: Switch to **Gemini** in the sidebar for immediate results!")
+        elif provider == "Gemini" and any(word in error.lower() for word in ["quota", "exceeded", "limit"]):
             other_providers = [p for p in providers.keys() if p != provider and providers[p]["key"]]
             if other_providers:
-                st.success(f"💡 **Try switching to**: {', '.join(other_providers)}")
-                st.info("These providers might have different limits or better availability!")
+                st.info(f"🔄 **Alternative**: Try {', '.join(other_providers)} while waiting for Gemini quota reset")
+        
         return []
     
     if not raw_quiz:
@@ -583,7 +683,20 @@ def generate_quiz(content: str, provider: str, providers: dict):
     quiz = parse_quiz_from_text(raw_quiz)
     if not quiz:
         st.error("Could not parse quiz. Please try again.")
+        # Debug info for developers
+        if raw_quiz:
+            with st.expander("🔍 Debug: Raw AI Response (for troubleshooting)"):
+                st.text(raw_quiz[:1000] + "..." if len(raw_quiz) > 1000 else raw_quiz)
         return []
+    
+    if len(quiz) < 5:
+        st.warning(f"⚠️ Only generated {len(quiz)} questions instead of 5. The AI response may have been incomplete.")
+        # Show debug info
+        with st.expander("🔍 Debug: AI Response Analysis"):
+            st.write(f"**Questions found**: {len(quiz)}")
+            st.write(f"**Raw response length**: {len(raw_quiz) if raw_quiz else 0} characters")
+            if raw_quiz:
+                st.text_area("Raw response:", raw_quiz, height=200)
     
     st.success(f"✅ Generated {len(quiz)} questions using {provider}!")
     return {"original": quiz, "shuffled": shuffle_quiz(quiz)}
@@ -645,8 +758,20 @@ if st.session_state.input_mode == "Paste URL":
             st.rerun()
 
     if st.session_state.page_text:
-        with st.expander("📖 Preview extracted text"):
-            st.text_area("Content:", st.session_state.page_text, height=200, disabled=True)
+        with st.expander("📖 Preview extracted text", expanded=False):
+            # Create copyable text display
+            st.write("**Extracted Content:**")
+            st.code(st.session_state.page_text, language=None)
+            
+            # Alternative: Text area that's definitely copyable
+            st.text_area(
+                "Copy from here:",
+                value=st.session_state.page_text,
+                height=150,
+                disabled=False,
+                key="copyable_text",
+                help="You can copy and edit this text"
+            )
 
 # Text input
 else:
